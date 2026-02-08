@@ -15,7 +15,7 @@ import threading
 import time
 from core.source import pcap_source, live_source, get_available_interfaces, CaptureConfig
 from core.parser import parse_packet
-from core.features import aggregate_features
+from core.feature_extractor import extract_features
 from core.detector import detect_anomalies
 from core.sink import log_alert, print_alert
 from core.database import store_alert, store_feature_vector, store_packet, get_historical_alerts, get_historical_traffic
@@ -146,7 +146,7 @@ if source_mode == "实时抓包" and st.session_state.capture_running:
             parsed_packets: List[ParsedPacket] = [parse_packet(evt) for evt in recent_packets]
             
             # Feature：ParsedPacket → FeatureVector（5 元组 + 时间窗口聚合）
-            feature_vectors: List[FeatureVector] = aggregate_features(parsed_packets, window_seconds=5.0)
+            feature_vectors: List[FeatureVector] = extract_features(parsed_packets, window_seconds=5.0)
             
             # Detection：FeatureVector → Alert
             alerts = detect_anomalies(feature_vectors)
@@ -166,7 +166,21 @@ if source_mode == "实时抓包" and st.session_state.capture_running:
                 store_packet(pkt)
             
             if feature_vectors:
-                fv_df = pd.DataFrame([fv.__dict__ for fv in feature_vectors])
+                fv_df = pd.DataFrame([
+                    {
+                        "window_start": fv.window_start,
+                        "window_end": fv.window_end,
+                        "src_ip": fv.src_ip,
+                        "dst_ip": fv.dst_ip,
+                        "src_port": fv.src_port,
+                        "dst_port": fv.dst_port,
+                        "protocol": fv.protocol,
+                        "packet_count": fv.statistical.packet_count,
+                        "byte_count": fv.statistical.byte_count,
+                        "syn_count": fv.statistical.syn_count,
+                    }
+                    for fv in feature_vectors
+                ])
                 
                 # 流量趋势图表
                 st.markdown("**流量趋势**")
@@ -250,7 +264,7 @@ else:
                 parsed_packets: List[ParsedPacket] = [parse_packet(evt) for evt in events]
 
                 # Feature：ParsedPacket → FeatureVector（5 元组 + 时间窗口聚合）
-                feature_vectors: List[FeatureVector] = aggregate_features(parsed_packets, window_seconds=5.0)
+                feature_vectors: List[FeatureVector] = extract_features(parsed_packets, window_seconds=5.0)
 
                 # Detection：FeatureVector → Alert
                 alerts = detect_anomalies(feature_vectors)
@@ -270,7 +284,21 @@ else:
                 )
 
                 if feature_vectors:
-                    fv_df = pd.DataFrame([fv.__dict__ for fv in feature_vectors])
+                    fv_df = pd.DataFrame([
+                        {
+                            "window_start": fv.window_start,
+                            "window_end": fv.window_end,
+                            "src_ip": fv.src_ip,
+                            "dst_ip": fv.dst_ip,
+                            "src_port": fv.src_port,
+                            "dst_port": fv.dst_port,
+                            "protocol": fv.protocol,
+                            "packet_count": fv.statistical.packet_count,
+                            "byte_count": fv.statistical.byte_count,
+                            "syn_count": fv.statistical.syn_count,
+                        }
+                        for fv in feature_vectors
+                    ])
 
                     st.markdown("**Top-N 5 元组（按包数）**")
                     top_flows = (

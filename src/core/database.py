@@ -57,7 +57,34 @@ class DatabaseManager:
                 byte_count INTEGER NOT NULL,
                 avg_pkt_len REAL NOT NULL,
                 max_pkt_len INTEGER NOT NULL,
+                min_pkt_len INTEGER NOT NULL,
+                std_pkt_len REAL NOT NULL,
+                packet_rate REAL NOT NULL,
+                byte_rate REAL NOT NULL,
+                inter_arrival_time REAL NOT NULL,
                 syn_count INTEGER NOT NULL,
+                ack_count INTEGER NOT NULL,
+                fin_count INTEGER NOT NULL,
+                rst_count INTEGER NOT NULL,
+                header_size INTEGER NOT NULL,
+                payload_size INTEGER NOT NULL,
+                ttl_avg REAL NOT NULL,
+                ttl_min INTEGER NOT NULL,
+                ttl_max INTEGER NOT NULL,
+                tcp_window_size_avg REAL NOT NULL,
+                tcp_window_size_max INTEGER NOT NULL,
+                payload_entropy REAL NOT NULL,
+                is_fragmented INTEGER NOT NULL,
+                is_ddos INTEGER NOT NULL,
+                is_port_scan INTEGER NOT NULL,
+                is_syn_flood INTEGER NOT NULL,
+                is_udp_flood INTEGER NOT NULL,
+                is_icmp_flood INTEGER NOT NULL,
+                connection_count INTEGER NOT NULL,
+                unique_dst_ports INTEGER NOT NULL,
+                unique_src_ips INTEGER NOT NULL,
+                packet_burst_score REAL NOT NULL,
+                scan_pattern_score REAL NOT NULL,
                 extra TEXT
             )
             ''')
@@ -107,15 +134,25 @@ class DatabaseManager:
         """
         插入流量特征记录。
         """
+        stat = feature_vector.statistical
+        proto = feature_vector.protocol_features
+        attack = feature_vector.attack
+        
         with sqlite3.connect(self.db_path) as conn:
             insert = conn.cursor()
             insert.execute(
                 '''
                 INSERT INTO traffic_features (
                     window_start, window_end, src_ip, dst_ip, src_port, dst_port, protocol,
-                    packet_count, byte_count, avg_pkt_len, max_pkt_len, syn_count, extra
+                    packet_count, byte_count, avg_pkt_len, max_pkt_len, min_pkt_len, std_pkt_len,
+                    packet_rate, byte_rate, inter_arrival_time, syn_count, ack_count, fin_count, rst_count,
+                    header_size, payload_size, ttl_avg, ttl_min, ttl_max,
+                    tcp_window_size_avg, tcp_window_size_max, payload_entropy, is_fragmented,
+                    is_ddos, is_port_scan, is_syn_flood, is_udp_flood, is_icmp_flood,
+                    connection_count, unique_dst_ports, unique_src_ips, packet_burst_score, scan_pattern_score,
+                    extra
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     feature_vector.window_start,
@@ -125,11 +162,38 @@ class DatabaseManager:
                     feature_vector.src_port,
                     feature_vector.dst_port,
                     feature_vector.protocol,
-                    feature_vector.packet_count,
-                    feature_vector.byte_count,
-                    feature_vector.avg_pkt_len,
-                    feature_vector.max_pkt_len,
-                    feature_vector.syn_count,
+                    stat.packet_count,
+                    stat.byte_count,
+                    stat.avg_pkt_len,
+                    stat.max_pkt_len,
+                    stat.min_pkt_len,
+                    stat.std_pkt_len,
+                    stat.packet_rate,
+                    stat.byte_rate,
+                    stat.inter_arrival_time,
+                    stat.syn_count,
+                    stat.ack_count,
+                    stat.fin_count,
+                    stat.rst_count,
+                    proto.header_size,
+                    proto.payload_size,
+                    proto.ttl_avg,
+                    proto.ttl_min,
+                    proto.ttl_max,
+                    proto.tcp_window_size_avg,
+                    proto.tcp_window_size_max,
+                    proto.payload_entropy,
+                    int(proto.is_fragmented),
+                    int(attack.is_ddos),
+                    int(attack.is_port_scan),
+                    int(attack.is_syn_flood),
+                    int(attack.is_udp_flood),
+                    int(attack.is_icmp_flood),
+                    attack.connection_count,
+                    attack.unique_dst_ports,
+                    attack.unique_src_ips,
+                    attack.packet_burst_score,
+                    attack.scan_pattern_score,
                     json.dumps(feature_vector.extra, ensure_ascii=False)
                 )
             )

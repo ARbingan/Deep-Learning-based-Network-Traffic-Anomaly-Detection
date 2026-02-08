@@ -8,7 +8,7 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-from .types import FeatureVector
+from .types import FeatureVector, StatisticalFeatures, ProtocolFeatures, AttackFeatures
 from .sink import Alert
 
 
@@ -31,6 +31,14 @@ class RuleDetector:
             "byte_flood": {
                 "threshold": 100000,  # 5秒窗口内总字节数阈值
                 "description": "字节洪水攻击检测"
+            },
+            "port_scan": {
+                "threshold": 10,  # 访问的端口数量阈值
+                "description": "端口扫描攻击检测"
+            },
+            "ddos": {
+                "threshold": 0.7,  # DDoS 检测阈值
+                "description": "DDoS 攻击检测"
             }
         }
 
@@ -39,10 +47,13 @@ class RuleDetector:
         基于规则检测异常。
         """
         alerts = []
+        stat = feature_vector.statistical
+        proto = feature_vector.protocol_features
+        attack = feature_vector.attack
 
         # 检测 SYN 洪水
-        if feature_vector.syn_count > self.rules["syn_flood"]["threshold"]:
-            score = min(100.0, feature_vector.syn_count / self.rules["syn_flood"]["threshold"] * 100)
+        if stat.syn_count > self.rules["syn_flood"]["threshold"]:
+            score = min(100.0, stat.syn_count / self.rules["syn_flood"]["threshold"] * 100)
             alerts.append(Alert(
                 timestamp=datetime.now(),
                 src_ip=feature_vector.src_ip,
@@ -51,14 +62,14 @@ class RuleDetector:
                 score=score,
                 detail={
                     "rule": "syn_flood",
-                    "syn_count": feature_vector.syn_count,
+                    "syn_count": stat.syn_count,
                     "threshold": self.rules["syn_flood"]["threshold"]
                 }
             ))
 
         # 检测数据包洪水
-        if feature_vector.packet_count > self.rules["packet_flood"]["threshold"]:
-            score = min(100.0, feature_vector.packet_count / self.rules["packet_flood"]["threshold"] * 100)
+        if stat.packet_count > self.rules["packet_flood"]["threshold"]:
+            score = min(100.0, stat.packet_count / self.rules["packet_flood"]["threshold"] * 100)
             alerts.append(Alert(
                 timestamp=datetime.now(),
                 src_ip=feature_vector.src_ip,
@@ -67,14 +78,14 @@ class RuleDetector:
                 score=score,
                 detail={
                     "rule": "packet_flood",
-                    "packet_count": feature_vector.packet_count,
+                    "packet_count": stat.packet_count,
                     "threshold": self.rules["packet_flood"]["threshold"]
                 }
             ))
 
         # 检测字节洪水
-        if feature_vector.byte_count > self.rules["byte_flood"]["threshold"]:
-            score = min(100.0, feature_vector.byte_count / self.rules["byte_flood"]["threshold"] * 100)
+        if stat.byte_count > self.rules["byte_flood"]["threshold"]:
+            score = min(100.0, stat.byte_count / self.rules["byte_flood"]["threshold"] * 100)
             alerts.append(Alert(
                 timestamp=datetime.now(),
                 src_ip=feature_vector.src_ip,
@@ -83,8 +94,41 @@ class RuleDetector:
                 score=score,
                 detail={
                     "rule": "byte_flood",
-                    "byte_count": feature_vector.byte_count,
+                    "byte_count": stat.byte_count,
                     "threshold": self.rules["byte_flood"]["threshold"]
+                }
+            ))
+
+        # 检测端口扫描
+        if attack.unique_dst_ports > self.rules["port_scan"]["threshold"]:
+            score = min(100.0, attack.unique_dst_ports / self.rules["port_scan"]["threshold"] * 100)
+            alerts.append(Alert(
+                timestamp=datetime.now(),
+                src_ip=feature_vector.src_ip,
+                dst_ip=feature_vector.dst_ip,
+                alert_type="Port Scan",
+                score=score,
+                detail={
+                    "rule": "port_scan",
+                    "unique_dst_ports": attack.unique_dst_ports,
+                    "threshold": self.rules["port_scan"]["threshold"]
+                }
+            ))
+
+        # 检测 DDoS
+        if attack.is_ddos or attack.packet_burst_score > self.rules["ddos"]["threshold"]:
+            score = max(attack.packet_burst_score * 100, attack.scan_pattern_score * 100)
+            alerts.append(Alert(
+                timestamp=datetime.now(),
+                src_ip=feature_vector.src_ip,
+                dst_ip=feature_vector.dst_ip,
+                alert_type="DDoS Attack",
+                score=score,
+                detail={
+                    "rule": "ddos",
+                    "is_ddos": attack.is_ddos,
+                    "packet_burst_score": attack.packet_burst_score,
+                    "scan_pattern_score": attack.scan_pattern_score
                 }
             ))
 
@@ -111,21 +155,33 @@ class MLDetector:
         
         简化实现：基于特征向量计算异常概率
         """
+        stat = feature_vector.statistical
+        proto = feature_vector.protocol
+        attack = feature_vector.attack
+        
         # 计算异常概率（简化实现）
+        # 实际应用中应该使用训练好的模型
         features = [
-            feature_vector.packet_count,
-            feature_vector.byte_count,
-            feature_vector.avg_pkt_len,
-            feature_vector.max_pkt_len,
-            feature_vector.syn_count
+            stat.packet_count,
+            stat.byte_count,
+            stat.avg_pkt_len,
+            stat.max_pkt_len,
+            stat.syn_count,
+            stat.packet_rate,
+            stat.byte_rate,
+            proto.payload_entropy,
+            attack.packet_burst_score,
+            attack.scan_pattern_score
         ]
 
         # 简化的异常概率计算
-        # 实际应用中应该使用训练好的模型
         anomaly_prob = min(1.0, (
-            feature_vector.packet_count / 1000 +
-            feature_vector.byte_count / 100000 +
-            feature_vector.syn_count / 50
+            stat.packet_count / 1000 +
+            stat.byte_count / 100000 +
+            stat.syn_count / 50 +
+            stat.packet_rate / 100 +
+            attack.packet_burst_score +
+            attack.scan_pattern_score
         ))
 
         if anomaly_prob > self.threshold:

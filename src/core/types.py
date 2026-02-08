@@ -38,6 +38,58 @@ class ParsedPacket:
 
 
 @dataclass
+class StatisticalFeatures:
+    """统计特征：长度、分布、速率、频率"""
+
+    packet_count: int
+    byte_count: int
+    avg_pkt_len: float
+    max_pkt_len: int
+    min_pkt_len: int
+    std_pkt_len: float
+    packet_rate: float
+    byte_rate: float
+    inter_arrival_time: float
+    syn_count: int
+    ack_count: int
+    fin_count: int
+    rst_count: int
+
+
+@dataclass
+class ProtocolFeatures:
+    """协议特征：字段组合、报文格式"""
+
+    protocol_type: str
+    header_size: int
+    payload_size: int
+    ttl_avg: float
+    ttl_min: int
+    ttl_max: int
+    tcp_window_size_avg: float
+    tcp_window_size_max: int
+    tcp_flags_distribution: Dict[str, int]
+    payload_entropy: float
+    is_fragmented: bool
+
+
+@dataclass
+class AttackFeatures:
+    """攻击特征：DDoS模式、扫描行为等"""
+
+    is_ddos: bool
+    is_port_scan: bool
+    is_syn_flood: bool
+    is_udp_flood: bool
+    is_icmp_flood: bool
+    connection_count: int
+    unique_dst_ports: int
+    unique_src_ips: int
+    packet_burst_score: float
+    scan_pattern_score: float
+
+
+@dataclass
 class FeatureVector:
     """
     Feature 层：按 5 元组 + 时间窗口聚合后的特征。
@@ -51,11 +103,9 @@ class FeatureVector:
     dst_port: int
     protocol: str
 
-    packet_count: int
-    byte_count: int
-    avg_pkt_len: float
-    max_pkt_len: int
-    syn_count: int
+    statistical: StatisticalFeatures
+    protocol_features: ProtocolFeatures
+    attack: AttackFeatures
 
     extra: Dict[str, Any]
 
