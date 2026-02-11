@@ -16,7 +16,7 @@ import time
 from core.source import pcap_source, live_source, get_available_interfaces, CaptureConfig
 from core.parser import parse_packet
 from core.feature_extractor import extract_features
-from core.detector import detect_anomalies
+from core.detection_engine import detect_anomalies, get_detection_performance
 from core.sink import log_alert, print_alert
 from core.database import store_alert, store_feature_vector, store_packet, get_historical_alerts, get_historical_traffic
 from core.types import ParsedPacket, FeatureVector, PacketEvent
@@ -282,6 +282,11 @@ else:
                         "检测到的告警数量": len(alerts),
                     }
                 )
+                
+                # 显示检测性能
+                st.markdown("**检测性能**")
+                performance = get_detection_performance()
+                st.write(performance)
 
                 if feature_vectors:
                     fv_df = pd.DataFrame([
