@@ -12,7 +12,7 @@ from typing import Optional, Iterable, Callable
 
 from scapy.all import sniff, rdpcap, Packet  # type: ignore
 
-from .types import PacketEvent
+from .custom_types import PacketEvent
 
 
 @dataclass

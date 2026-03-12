@@ -11,7 +11,7 @@ from typing import List, Dict, Any
 import math
 import numpy as np
 
-from .types import ParsedPacket, FeatureVector, StatisticalFeatures, ProtocolFeatures, AttackFeatures
+from .custom_types import ParsedPacket, FeatureVector, StatisticalFeatures, ProtocolFeatures, AttackFeatures
 
 
 class StatisticalFeatureExtractor:

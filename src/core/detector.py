@@ -8,7 +8,7 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-from .types import FeatureVector, StatisticalFeatures, ProtocolFeatures, AttackFeatures
+from .custom_types import FeatureVector, StatisticalFeatures, ProtocolFeatures, AttackFeatures
 from .sink import Alert
 
 

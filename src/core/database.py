@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 from .sink import Alert
-from .types import FeatureVector, ParsedPacket
+from .custom_types import FeatureVector, ParsedPacket
 
 
 class DatabaseManager:

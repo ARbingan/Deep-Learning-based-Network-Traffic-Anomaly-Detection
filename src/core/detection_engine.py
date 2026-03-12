@@ -22,8 +22,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-from .types import FeatureVector, StatisticalFeatures, ProtocolFeatures, AttackFeatures
+from .custom_types import FeatureVector, StatisticalFeatures, ProtocolFeatures, AttackFeatures
 from .sink import Alert
+from .transformer_integration import TransformerDetector
 
 
 class RuleMatcher:
@@ -559,41 +560,67 @@ class ThresholdController:
 class DetectionEngine:
     """
     检测引擎：统一的检测接口。
-    
+   
     特性：
-    - 集成规则匹配和机器学习
-    - 融合检测结果
-    - 提供统一的检测接口
+     - 集成规则匹配、机器学习和Transformer检测
+     - 融合检测结果
+     - 提供统一的检测接口
     """
-
-    def __init__(self, rules_file: Optional[str] = None, model_path: Optional[str] = None):
-        """
-        初始化检测引擎。
-        
-        参数：
-            rules_file: 规则配置文件路径
-            model_path: 预训练模型路径
-        """
-        self.rule_matcher = RuleMatcher(rules_file)
-        self.ml_model = MLModel(model_path=model_path)
-        self.threshold_controller = ThresholdController()
-        self.detection_history: List[Dict[str, Any]] = []
+    def __init__(self, rules_file: Optional[str] = None, model_path: Optional[str] = None, transformer_model_path: Optional[str] = None):
+       """
+       初始化检测引擎。
+       
+       参数：
+           rules_file: 规则配置文件路径
+           model_path: 预训练ML模型路径
+           transformer_model_path: 预训练Transformer模型路径
+       """
+       self.rule_matcher = RuleMatcher(rules_file)
+       self.ml_model = MLModel(model_path=model_path)
+       self.transformer_detector = TransformerDetector(model_path=transformer_model_path) if transformer_model_path else None
+       self.threshold_controller = ThresholdController()
+       self.detection_history: List[Dict[str, Any]] = []
+       
+       # 用于Transformer序列缓冲
+       self.feature_buffer: List[FeatureVector] = []
+       self.buffer_max_len = 20  # 缓冲区大小，应大于seq_len
 
     def detect(self, feature_vector: FeatureVector) -> Optional[Alert]:
         """
         检测异常。
-        
+       
         参数：
             feature_vector: 特征向量
-        
+       
         返回：
             Alert: 检测到的告警
         """
         # 规则检测
         rule_alerts = self.rule_matcher.match(feature_vector)
+
         
         # 机器学习检测
         ml_alert, ml_prob = self.ml_model.predict(feature_vector)
+        
+        # Transformer检测（如果启用）
+        transformer_alert = None
+        if self.transformer_detector:
+            # 更新缓冲区
+            self.feature_buffer.append(feature_vector)
+            if len(self.feature_buffer) > self.buffer_max_len:
+                self.feature_buffer.pop(0)
+            
+            # 如果缓冲区足够，进行Transformer检测
+            if len(self.feature_buffer) >= self.transformer_detector.seq_len:
+                # 注意：这里应该异步或批量处理，避免实时性受影响
+                # 简单实现：只对最新序列检测
+                recent_buffer = self.feature_buffer[-self.transformer_detector.seq_len:]
+                # 使用batch_predict获取结果
+                results = self.transformer_detector.batch_predict([recent_buffer])
+                if results:
+                    alert, score = results[0]
+                    if alert:
+                        transformer_alert = (alert, score, 0.85, 4, "transformer")
         
         # 收集所有告警
         all_alerts = []
@@ -607,6 +634,12 @@ class DetectionEngine:
         if ml_alert:
             confidence = self.threshold_controller.calculate_confidence(ml_alert, "ml")
             all_alerts.append((ml_alert, confidence, 0.8, 3, "ml"))
+        
+        # 处理Transformer告警
+        if transformer_alert:
+            alert, score, weight, priority, det_type = transformer_alert
+            confidence = self.threshold_controller.calculate_confidence(alert, "transformer")
+            all_alerts.append((alert, confidence, weight, priority, "transformer"))
         
         # 融合告警
         if all_alerts:
@@ -700,6 +733,7 @@ class DetectionEngine:
                 'total_alerts': 0,
                 'rule_alerts': 0,
                 'ml_alerts': 0,
+                'transformer_alerts': 0,
                 'current_threshold': self.threshold_controller.get_threshold()
             }
         
@@ -708,18 +742,20 @@ class DetectionEngine:
         total_alerts = sum(1 for h in self.detection_history if h['alert'])
         rule_alerts = sum(1 for h in self.detection_history if h['detector_type'] == 'rule')
         ml_alerts = sum(1 for h in self.detection_history if h['detector_type'] == 'ml')
+        transformer_alerts = sum(1 for h in self.detection_history if h['detector_type'] == 'transformer')
         
         return {
             'total_detections': total_detections,
             'total_alerts': total_alerts,
             'rule_alerts': rule_alerts,
             'ml_alerts': ml_alerts,
+            'transformer_alerts': transformer_alerts,
             'current_threshold': self.threshold_controller.get_threshold(),
             'detection_rate': total_alerts / total_detections if total_detections > 0 else 0.0
         }
 
 
-# 全局检测引擎实例
+# 全局检测引擎实例（默认不加载Transformer）
 detection_engine = DetectionEngine()
 
 
@@ -734,6 +770,31 @@ def detect_anomalies(feature_vectors: List[FeatureVector]) -> List[Alert]:
         List[Alert]: 检测到的告警列表
     """
     return detection_engine.batch_detect(feature_vectors)
+
+
+def init_detection_engine(
+    rules_file: Optional[str] = None,
+    model_path: Optional[str] = None,
+    transformer_model_path: Optional[str] = None
+) -> DetectionEngine:
+    """
+    初始化带Transformer的检测引擎。
+    
+    参数：
+        rules_file: 规则配置文件路径
+        model_path: ML模型路径
+        transformer_model_path: Transformer模型路径
+    
+    返回：
+        DetectionEngine实例
+    """
+    global detection_engine
+    detection_engine = DetectionEngine(
+        rules_file=rules_file,
+        model_path=model_path,
+        transformer_model_path=transformer_model_path
+    )
+    return detection_engine
 
 
 def train_model(X: np.ndarray, y: np.ndarray):

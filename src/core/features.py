@@ -10,7 +10,7 @@ from typing import Iterable, List
 
 import math
 
-from .types import ParsedPacket, FeatureVector
+from .custom_types import ParsedPacket, FeatureVector
 
 
 def aggregate_features(

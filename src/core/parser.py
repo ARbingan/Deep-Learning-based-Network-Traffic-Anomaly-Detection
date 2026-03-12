@@ -6,7 +6,7 @@ from typing import Optional
 
 from scapy.all import IP, IPv6, TCP, UDP, Raw  # type: ignore
 
-from .types import PacketEvent, ParsedPacket
+from .custom_types import PacketEvent, ParsedPacket
 
 
 def parse_packet(event: PacketEvent, direction: Optional[str] = None) -> ParsedPacket:
