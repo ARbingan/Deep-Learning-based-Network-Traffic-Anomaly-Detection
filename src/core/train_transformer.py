@@ -42,17 +42,17 @@ def prepare_training_data(
     返回：
         FeatureVector列表（按时间排序）
     """
-    print(f"📊 从数据库加载历史流量数据...")
+    print(f"[INFO] 从数据库加载历史流量数据...")
     
     # 从数据库获取历史流量特征
     # 注意：get_historical_traffic返回的是字典，需要转换为FeatureVector对象
     traffic_data = get_historical_traffic(limit=10000)
     
     if not traffic_data:
-        print("⚠️  数据库中没有历史流量数据，请先运行系统收集数据")
+        print("[WARNING] 数据库中没有历史流量数据，请先运行系统收集数据")
         return []
     
-    print(f"✅ 加载了 {len(traffic_data)} 条历史流量记录")
+    print(f"[OK] 加载了 {len(traffic_data)} 条历史流量记录")
     
     # 转换为FeatureVector对象
     feature_vectors = []
@@ -75,11 +75,11 @@ def prepare_training_data(
             )
             feature_vectors.append(fv)
         except Exception as e:
-            print(f"⚠️  跳过无效记录：{e}")
+            print(f"[WARNING] 跳过无效记录：{e}")
             continue
     
     if len(feature_vectors) < min_samples:
-        print(f"⚠️  样本数不足（{len(feature_vectors)} < {min_samples}），建议先收集更多数据")
+        print(f"[WARNING] 样本数不足（{len(feature_vectors)} < {min_samples}），建议先收集更多数据")
     
     # 按时间排序
     feature_vectors.sort(key=lambda x: x.window_start)
@@ -191,14 +191,15 @@ def generate_synthetic_data(
         )
         feature_vectors.append(fv)
     
-    print(f"✅ 合成数据生成完成：正常={n_samples - n_anomalies}，异常={n_anomalies}")
+    print(f"[OK] 合成数据生成完成：正常={n_samples - n_anomalies}，异常={n_anomalies}")
     return feature_vectors
 
 
 def train_transformer(
     feature_vectors: List[FeatureVector],
     config: dict,
-    model_save_path: str = "models/transformer_detector.pth"
+    model_save_path: str = "models/transformer_detector.pth",
+    labels: Optional[List[int]] = None
 ) -> Tuple[nn.Module, dict]:
     """
     训练Transformer模型。
@@ -207,14 +208,15 @@ def train_transformer(
         feature_vectors: 训练数据
         config: 训练配置字典
         model_save_path: 模型保存路径
+        labels: 每个FeatureVector的标签（可选，如果提供则使用）
         
     返回：
         (训练好的模型, 性能指标)
     """
-    print("🚀 开始训练Transformer模型...")
+    print("开始训练Transformer模型...")
     
     # 1. 准备数据
-    print("\n📦 准备数据集...")
+    print("\n准备数据集...")
     data_module = TransformerDataModule(
         feature_vectors=feature_vectors,
         seq_len=config['seq_len'],
@@ -222,7 +224,8 @@ def train_transformer(
         batch_size=config['batch_size'],
         val_split=config['val_split'],
         test_split=config['test_split'],
-        use_rule_labels=config['use_rule_labels'],
+        labels=labels,
+        use_rule_labels=config['use_rule_labels'] if labels is None else False,
         normalize=config['normalize']
     )
     
@@ -230,7 +233,7 @@ def train_transformer(
     val_loader = data_module.val_dataloader()
     
     # 2. 初始化模型
-    print("\n🏗️  构建模型...")
+    print("\n构建模型...")
     model = TinyTransformer(
         feature_dim=config['feature_dim'],
         d_model=config['d_model'],
@@ -265,12 +268,11 @@ def train_transformer(
         optimizer,
         mode='min',
         factor=0.5,
-        patience=config['lr_patience'],
-        verbose=True
+        patience=config['lr_patience']
     )
     
     # 5. 训练循环
-    print("\n🎯 开始训练...")
+    print("\n开始训练...")
     best_val_loss = float('inf')
     best_val_f1 = 0.0
     history = {'train_loss': [], 'val_loss': [], 'val_f1': []}
@@ -281,12 +283,35 @@ def train_transformer(
         train_loss = 0.0
         train_batches = 0
         
-        for batch_x, batch_y in train_loader:
+        for batch_idx, (batch_x, batch_y) in enumerate(train_loader):
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            
+            # 调试：检查第一批数据
+            if epoch == 0 and batch_idx == 0:
+                print(f"\n[调试] 第一批数据检查:")
+                print(f"  batch_x shape: {batch_x.shape}")
+                print(f"  batch_x min/max: {batch_x.min():.4f} / {batch_x.max():.4f}")
+                print(f"  batch_x 包含NaN: {torch.isnan(batch_x).any().item()}")
+                print(f"  batch_x 包含Inf: {torch.isinf(batch_x).any().item()}")
+                print(f"  batch_y: {batch_y}")
+                print(f"  batch_y min/max: {batch_y.min():.4f} / {batch_y.max():.4f}")
             
             optimizer.zero_grad()
             predictions = model(batch_x)
+            
+            # 调试：检查模型输出
+            if epoch == 0 and batch_idx == 0:
+                print(f"  predictions (before sigmoid如果模型未应用): {predictions}")
+                print(f"  predictions min/max: {predictions.min():.4f} / {predictions.max():.4f}")
+                print(f"  predictions 包含NaN: {torch.isnan(predictions).any().item()}")
+                print(f"  predictions 包含Inf: {torch.isinf(predictions).any().item()}")
+            
             loss = criterion(predictions, batch_y)
+            
+            if torch.isnan(loss):
+                print(f"[ERROR] Loss为NaN! predictions={predictions}, batch_y={batch_y}")
+                import sys; sys.exit(1)
+            
             loss.backward()
             
             # 梯度裁剪
@@ -365,9 +390,9 @@ def train_transformer(
                 'val_recall': recall,
                 'history': history
             }, model_save_path)
-            print(f"  ✓ 保存最佳模型 (F1={f1:.4f})")
+            print(f"  保存最佳模型 (F1={f1:.4f})")
     
-    print(f"\n✅ 训练完成！最佳验证F1：{best_val_f1:.4f}")
+    print(f"\n训练完成！最佳验证F1：{best_val_f1:.4f}")
     
     # 6. 加载最佳模型
     checkpoint = torch.load(model_save_path, map_location=device, weights_only=False)
@@ -387,7 +412,7 @@ def evaluate_model(
     返回：
         性能指标字典
     """
-    print("\n📊 评估模型性能...")
+    print("\n评估模型性能...")
     
     model.eval()
     all_preds = []
@@ -434,12 +459,12 @@ def evaluate_model(
     }
     
     print(f"测试集性能：")
-    print(f"  准确率：{accuracy:.2%}")
-    print(f"  精确率：{precision:.2%}")
-    print(f"  召回率：{recall:.2%}")
-    print(f"  F1分数：{f1:.2%}")
-    print(f"  AUC：{auc:.4f}")
-    print(f"  混淆矩阵：{cm}")
+    print(f"  准确率: {accuracy:.2%}")
+    print(f"  精确率: {precision:.2%}")
+    print(f"  召回率: {recall:.2%}")
+    print(f"  F1分数: {f1:.2%}")
+    print(f"  AUC: {auc:.4f}")
+    print(f"  混淆矩阵: {cm}")
     
     return metrics
 
@@ -460,7 +485,7 @@ def main(config: dict):
         )
     
     if not feature_vectors:
-        print("❌ 无训练数据，退出")
+        print("[ERROR] 无训练数据，退出")
         sys.exit(1)
     
     # 2. 训练模型
@@ -493,7 +518,7 @@ def main(config: dict):
         save_metrics = {k: v for k, v in metrics.items() if k != 'confusion_matrix'}
         save_metrics['confusion_matrix'] = metrics['confusion_matrix']
         json.dump(save_metrics, f, indent=2)
-    print(f"\n📁 评估结果保存到：{results_path}")
+    print(f"\n评估结果保存到: {results_path}")
     
     return model, metrics
 

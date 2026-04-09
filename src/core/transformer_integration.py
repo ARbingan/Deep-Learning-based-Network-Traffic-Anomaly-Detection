@@ -11,6 +11,7 @@ import torch
 import numpy as np
 from typing import List, Optional, Tuple
 from pathlib import Path
+from datetime import datetime
 
 from .custom_types import FeatureVector
 from .sink import Alert
@@ -189,7 +190,7 @@ class TransformerDetector:
                 # 生成Alert（如果超过阈值）
                 if prob >= self.threshold:
                     alert = Alert(
-                        timestamp=torch.datetime.now(),  # 需要导入datetime
+                        timestamp=datetime.now(),
                         src_ip=fv.src_ip,
                         dst_ip=fv.dst_ip,
                         alert_type="Transformer Anomaly",

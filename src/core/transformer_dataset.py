@@ -23,32 +23,31 @@ def extract_feature_vector(fv: FeatureVector) -> np.ndarray:
     # 1. 统计特征（13维）
     stat = fv.statistical
     features.extend([
-        stat.packet_count,
-        stat.byte_count,
-        stat.avg_pkt_len if stat.avg_pkt_len is not None else 0.0,
-        stat.max_pkt_len,
-        stat.min_pkt_len,
-        stat.std_pkt_len if stat.std_pkt_len is not None else 0.0,
-        stat.packet_rate,
-        stat.byte_rate,
-        stat.inter_arrival_time if stat.inter_arrival_time is not None else 0.0,
-        stat.syn_count,
-        stat.ack_count,
-        stat.fin_count,
-        stat.rst_count
+        safe_float(stat.packet_count),
+        safe_float(stat.byte_count),
+        safe_float(stat.avg_pkt_len) if stat.avg_pkt_len is not None else 0.0,
+        safe_float(stat.max_pkt_len),
+        safe_float(stat.min_pkt_len),
+        safe_float(stat.std_pkt_len) if stat.std_pkt_len is not None else 0.0,
+        safe_float(stat.packet_rate),
+        safe_float(stat.byte_rate),
+        safe_float(stat.inter_arrival_time) if stat.inter_arrival_time is not None else 0.0,
+        safe_float(stat.syn_count),
+        safe_float(stat.ack_count),
+        safe_float(stat.fin_count),
+        safe_float(stat.rst_count)
     ])
     
-    # 2. 协议特征（10维）
+    # 2. 协议特征（10维：7个数值 + 3个one-hot）
     proto = fv.protocol_features
     features.extend([
-        proto.header_size,
-        proto.payload_size,
-        proto.ttl_avg if proto.ttl_avg is not None else 0.0,
-        proto.ttl_min if proto.ttl_min is not None else 0,
-        proto.ttl_max if proto.ttl_max is not None else 0,
-        proto.tcp_window_size_avg if proto.tcp_window_size_avg is not None else 0.0,
-        proto.tcp_window_size_max if proto.tcp_window_size_max is not None else 0,
-        proto.payload_entropy if proto.payload_entropy is not None else 0.0,
+        safe_float(proto.header_size),
+        safe_float(proto.payload_size),
+        safe_float(proto.ttl_avg) if proto.ttl_avg is not None else 0.0,
+        # 删除ttl_min, ttl_max（冗余）
+        safe_float(proto.tcp_window_size_avg) if proto.tcp_window_size_avg is not None else 0.0,
+        # 删除tcp_window_size_max（冗余）
+        safe_float(proto.payload_entropy) if proto.payload_entropy is not None else 0.0,
         int(proto.is_fragmented) if proto.is_fragmented is not None else 0,
         # 协议类型转为one-hot（3种主要协议）
         1 if proto.protocol_type == "TCP" else 0,
@@ -64,16 +63,34 @@ def extract_feature_vector(fv: FeatureVector) -> np.ndarray:
         int(attack.is_syn_flood),
         int(attack.is_udp_flood),
         int(attack.is_icmp_flood),
-        attack.connection_count,
-        attack.unique_dst_ports,
-        attack.unique_src_ips,
-        attack.packet_burst_score,
-        attack.scan_pattern_score
+        safe_float(attack.connection_count),
+        safe_float(attack.unique_dst_ports),
+        safe_float(attack.unique_src_ips),
+        safe_float(attack.packet_burst_score),
+        safe_float(attack.scan_pattern_score)
     ])
     
-    # 总共：13 + 12（协议10+3） + 10 = 35维
-    # 如果超过32维，需要截断或调整
-    return np.array(features[:32], dtype=np.float32)  # 确保32维
+    # 总共：13（统计）+ 10（协议）+ 9（攻击）= 32维 ✓
+    arr = np.array(features, dtype=np.float32)
+    
+    # 数值稳定性检查：替换NaN和Inf
+    arr = np.nan_to_num(arr, nan=0.0, posinf=1e6, neginf=-1e6)
+    
+    return arr  # 32维特征向量
+
+
+def safe_float(value, default=0.0, max_abs=1e6):
+    """安全转换为float，处理极端值"""
+    try:
+        v = float(value)
+        if np.isnan(v) or np.isinf(v):
+            return default
+        # 截断极大值
+        if abs(v) > max_abs:
+            return max_abs if v > 0 else -max_abs
+        return v
+    except:
+        return default
 
 
 class TransformerTrafficDataset(Dataset):
