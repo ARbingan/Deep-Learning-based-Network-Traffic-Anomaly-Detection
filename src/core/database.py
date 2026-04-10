@@ -18,8 +18,16 @@ class DatabaseManager:
     数据库管理器：负责数据库的初始化、连接和操作。
     """
 
-    def __init__(self, db_path: str = "data/traffic_analyzer.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        import os
+        if db_path is None:
+            # 使用绝对路径，确保数据库文件位置固定
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            self.db_path = os.path.join(project_root, "data", "traffic_analyzer.db")
+            # 确保data目录存在
+            os.makedirs(os.path.join(project_root, "data"), exist_ok=True)
+        else:
+            self.db_path = db_path
         self._init_db()
 
     def _init_db(self):
@@ -105,8 +113,51 @@ class DatabaseManager:
                 payload_len INTEGER
             )
             ''')
+            
+            # 表结构迁移：检查并添加缺少的列
+            self._migrate_tables(conn)
 
             conn.commit()
+    
+    def _migrate_tables(self, conn):
+        """
+        迁移表结构，添加可能缺少的列。
+        """
+        cursor = conn.cursor()
+        
+        # 检查traffic_features表是否缺少min_pkt_len列
+        cursor.execute("PRAGMA table_info(traffic_features)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        # 如果缺少min_pkt_len列，添加它
+        if 'min_pkt_len' not in columns:
+            cursor.execute("ALTER TABLE traffic_features ADD COLUMN min_pkt_len INTEGER NOT NULL DEFAULT 0")
+            print("[DB] 已添加缺少的 min_pkt_len 列")
+        
+        # 检查其他可能缺少的列
+        missing_columns = []
+        expected_columns = [
+            'std_pkt_len', 'packet_rate', 'byte_rate', 'inter_arrival_time',
+            'ack_count', 'fin_count', 'rst_count', 'header_size', 'payload_size',
+            'ttl_avg', 'ttl_min', 'ttl_max', 'tcp_window_size_avg', 'tcp_window_size_max',
+            'payload_entropy', 'is_fragmented', 'is_ddos', 'is_port_scan', 'is_syn_flood',
+            'is_udp_flood', 'is_icmp_flood', 'connection_count', 'unique_dst_ports',
+            'unique_src_ips', 'packet_burst_score', 'scan_pattern_score', 'extra'
+        ]
+        
+        for col in expected_columns:
+            if col not in columns:
+                missing_columns.append(col)
+                if col.endswith('_score') or col.endswith('_rate') or col.endswith('_avg') or col == 'std_pkt_len' or col == 'payload_entropy':
+                    # 数值类型列
+                    cursor.execute(f"ALTER TABLE traffic_features ADD COLUMN {col} REAL NOT NULL DEFAULT 0.0")
+                elif col == 'extra':
+                    # 文本类型列
+                    cursor.execute(f"ALTER TABLE traffic_features ADD COLUMN {col} TEXT DEFAULT NULL")
+                else:
+                    # 整数类型列
+                    cursor.execute(f"ALTER TABLE traffic_features ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+                print(f"[DB] 已添加缺少的 {col} 列")
 
     def insert_alert(self, alert: Alert):
         """
@@ -152,7 +203,7 @@ class DatabaseManager:
                     connection_count, unique_dst_ports, unique_src_ips, packet_burst_score, scan_pattern_score,
                     extra
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     feature_vector.window_start,

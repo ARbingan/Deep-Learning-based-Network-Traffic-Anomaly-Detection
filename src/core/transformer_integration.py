@@ -88,7 +88,7 @@ class TransformerDetector:
                 norm_data = json.load(f)
             self.mean = np.array(norm_data['mean'], dtype=np.float32)
             self.std = np.array(norm_data['std'], dtype=np.float32)
-            print(f"✅ 加载特征标准化参数：mean.shape={self.mean.shape}, std.shape={self.std.shape}")
+            print(f"加载特征标准化参数：mean.shape={self.mean.shape}, std.shape={self.std.shape}")
     
     def load_model(self, model_path: str):
         """加载预训练模型"""
@@ -114,7 +114,7 @@ class TransformerDetector:
         self.model.to(self.device)
         self.model.eval()
         
-        print(f"✅ 模型加载成功：{model_path}")
+        print(f"模型加载成功：{model_path}")
         print(f"   训练轮次：{checkpoint.get('epoch', 'unknown')}")
         print(f"   验证F1：{checkpoint.get('val_f1', 'unknown'):.4f}")
     

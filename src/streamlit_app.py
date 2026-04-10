@@ -10,7 +10,6 @@ from typing import List
 
 import pandas as pd
 import streamlit as st
-
 import threading
 import time
 from core.source import pcap_source, live_source, get_available_interfaces, CaptureConfig
@@ -19,7 +18,7 @@ from core.feature_extractor import extract_features
 from core.detection_engine import detect_anomalies, get_detection_performance
 from core.sink import log_alert, print_alert
 from core.database import store_alert, store_feature_vector, store_packet, get_historical_alerts, get_historical_traffic
-from core.types import ParsedPacket, FeatureVector, PacketEvent
+from core.custom_types import ParsedPacket, FeatureVector, PacketEvent
 
 
 st.set_page_config(
@@ -50,7 +49,14 @@ with st.sidebar:
         # 获取可用网络接口
         interfaces = get_available_interfaces()
         if interfaces:
-            iface = st.selectbox("选择网络接口：", interfaces)
+            # 提取友好名称用于显示
+            interface_options = [name for _, name in interfaces]
+            # 存储原始名称和友好名称的映射
+            interface_map = {name: raw for raw, name in interfaces}
+            # 创建选择框
+            selected_name = st.selectbox("选择网络接口：", interface_options)
+            # 获取对应的原始名称
+            iface = interface_map[selected_name]
         else:
             iface = st.text_input("网络接口名称（如 eth0 / Wi-Fi）", value="")
         bpf_filter = st.text_input("BPF 过滤表达式", value="tcp or udp")
@@ -58,7 +64,8 @@ with st.sidebar:
         if st.session_state.capture_running:
             if st.button("停止抓包"):
                 st.session_state.capture_running = False
-                st.session_state.captured_packets = []
+                st.session_state.capture_manager.stop()
+                st.session_state.capture_manager.clear_packets()
                 st.success("抓包已停止")
         else:
             if st.button("开始抓包"):
@@ -87,132 +94,300 @@ else:
     # 非实时模式下使用两列布局
     col_stats, col_alerts = st.columns(2)
 
+# 抓包线程管理器 - 采用简单可靠的线程设计，参考测试成功的实现
+class CaptureManager:
+    """使用线程的抓包管理器，确保抓包持续稳定运行"""
+    def __init__(self):
+        self.running = False
+        self.captured_packets = []
+        self.capture_thread = None
+        self.new_packets = 0  # 新捕获的数据包计数
+        self.iface = None
+        self.bpf_filter = None
+        print("[CAPTURE] 初始化抓包管理器")
+    
+    def packet_callback(self, evt):
+        """数据包回调函数"""
+        try:
+            self.captured_packets.append(evt)
+            self.new_packets += 1
+            # 限制数据包数量
+            if len(self.captured_packets) > 2000:
+                self.captured_packets = self.captured_packets[-1500:]
+        except Exception as e:
+            print(f"[CAPTURE] 回调函数异常: {e}")
+    
+    def _capture_thread_func(self):
+        """抓包线程函数 - 使用简单可靠的短时间循环"""
+        print(f"[CAPTURE] 启动抓包线程，接口: {self.iface}")
+        
+        from core.source import CaptureConfig, live_source
+        
+        config = CaptureConfig(
+            iface=self.iface,
+            bpf_filter=self.bpf_filter,
+            count=0,
+            timeout=None
+        )
+        
+        try:
+            # 直接调用live_source，它内部有自己的循环逻辑
+            live_source(config, self.packet_callback)
+        except Exception as e:
+            print(f"[CAPTURE] 抓包线程异常: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            if self.running:
+                print(f"[CAPTURE] 抓包线程意外退出")
+            else:
+                print(f"[CAPTURE] 抓包线程正常退出")
+    
+    def start(self, iface, bpf_filter):
+        """启动抓包"""
+        if self.running:
+            return
+        
+        print(f"[CAPTURE] 开始抓包，接口: {iface}")
+        
+        self.running = True
+        self.captured_packets = []
+        self.new_packets = 0
+        self.iface = iface
+        self.bpf_filter = bpf_filter
+        
+        # 启动抓包线程
+        self.capture_thread = threading.Thread(
+            target=self._capture_thread_func,
+            daemon=True
+        )
+        self.capture_thread.start()
+    
+    def stop(self):
+        """停止抓包"""
+        print("[CAPTURE] 停止抓包")
+        self.running = False
+        # 这里不需要强制终止线程，live_source会在内部循环中自然退出
+    
+    def get_packets(self):
+        """获取捕获的数据包"""
+        return self.captured_packets.copy()
+    
+    def get_new_packets_count(self):
+        """获取新捕获的数据包数量"""
+        count = self.new_packets
+        self.new_packets = 0
+        return count
+    
+    def reset_new_packets_count(self):
+        """重置新捕获的数据包计数器"""
+        self.new_packets = 0
+    
+    def clear_packets(self):
+        """清除所有捕获的数据包"""
+        self.captured_packets = []
+        self.new_packets = 0
+    
+    def check_health(self):
+        """检查抓包线程健康状态"""
+        if not self.running:
+            return
+        
+        # 检查线程是否还在运行
+        if self.capture_thread and not self.capture_thread.is_alive():
+            print(f"[CAPTURE] 抓包线程已死，重启中...")
+            self.restart()
+    
+    def restart(self):
+        """重启抓包"""
+        if not self.running or not self.iface:
+            return
+        
+        print(f"[CAPTURE] 重启抓包...")
+        self.stop()
+        time.sleep(0.5)
+        self.start(self.iface, self.bpf_filter)
+
+
+# 初始化抓包管理器
+if 'capture_manager' not in st.session_state:
+    st.session_state.capture_manager = CaptureManager()
+
+
 # 处理实时抓包模式
 if source_mode == "实时抓包" and st.session_state.capture_running:
+    # 启动抓包线程
+    if not st.session_state.capture_manager.running:
+        st.session_state.capture_manager.start(iface, bpf_filter)
+    
     # 实时仪表盘
     with col_dashboard:
         st.subheader("实时仪表盘")
         
+        # 添加醒目的刷新按钮
+        if st.button("🔄 手动刷新数据", key="manual_refresh", type="primary", help="点击刷新获取最新捕获的数据包"):
+            st.rerun()
+        
         # 显示抓包状态
         st.info(f"正在接口 {iface} 上抓包...")
+        
+        # 从抓包管理器获取数据包
+        captured_packets = st.session_state.capture_manager.get_packets()
+        new_packets_count = st.session_state.capture_manager.get_new_packets_count()
         
         # 实时统计卡片
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("已捕获数据包", len(st.session_state.captured_packets))
+            st.metric("已捕获数据包", len(captured_packets))
         with col2:
-            st.metric("最近处理数据包", min(100, len(st.session_state.captured_packets)))
+            st.metric("新捕获数据包", new_packets_count)
         with col3:
             st.metric("抓包状态", "运行中" if st.session_state.capture_running else "已停止")
         with col4:
-            st.metric("网络接口", iface)
+            st.metric("网络接口", iface.split('_')[-1][:8] if '_' in iface else iface)
         
-        # 定期更新界面
-        if time.time() - st.session_state.last_update > 1:
-            st.session_state.last_update = time.time()
-            st.experimental_rerun()
-        
-        # 启动后台线程进行抓包
-        def capture_thread():
-            def packet_callback(evt: PacketEvent):
-                st.session_state.captured_packets.append(evt)
-                # 限制缓存的数据包数量，避免内存占用过高
-                if len(st.session_state.captured_packets) > 1000:
-                    st.session_state.captured_packets = st.session_state.captured_packets[-1000:]
+        # 添加调试信息
+        with st.expander("调试信息"):
+            st.write(f"当前使用接口: {iface}")
+            st.write(f"BPF过滤表达式: {bpf_filter}")
+            st.write(f"抓包状态: {'运行中' if st.session_state.capture_running else '已停止'}")
+            st.write(f"已捕获数据包数: {len(captured_packets)}")
+            st.write(f"抓包线程状态: {'运行中' if st.session_state.capture_manager.running else '已停止'}")
             
-            config = CaptureConfig(
-                iface=iface,
-                bpf_filter=bpf_filter,
-                count=0,  # 不限制数量
-                timeout=None  # 不设置超时
-            )
-            live_source(config, packet_callback)
+            # 测试Scapy接口连接
+            import scapy.all as scapy
+            st.write(f"Scapy识别的接口数: {len(scapy.get_if_list())}")
+            st.write(f"当前接口在Scapy列表中: {iface in scapy.get_if_list()}")
         
-        # 只启动一个线程
-        if 'capture_thread' not in st.session_state or not st.session_state.capture_thread.is_alive():
-            st.session_state.capture_thread = threading.Thread(target=capture_thread, daemon=True)
-            st.session_state.capture_thread.start()
+        # 检查抓包线程健康状态，确保持续运行
+        st.session_state.capture_manager.check_health()
+        
+        # 定期更新界面 - 缩短更新间隔到0.5秒，提高实时性
+        if time.time() - st.session_state.last_update > 0.5:
+            st.session_state.last_update = time.time()
+            st.rerun()
     
     # 实时图表
     with col_charts:
         st.subheader("流量分析图表")
         
         # 处理已捕获的数据包
-        if st.session_state.captured_packets:
-            # 只处理最近的数据包
-            recent_packets = st.session_state.captured_packets[-100:]
-            
-            # Parser：PacketEvent → ParsedPacket
-            parsed_packets: List[ParsedPacket] = [parse_packet(evt) for evt in recent_packets]
-            
-            # Feature：ParsedPacket → FeatureVector（5 元组 + 时间窗口聚合）
-            feature_vectors: List[FeatureVector] = extract_features(parsed_packets, window_seconds=5.0)
-            
-            # Detection：FeatureVector → Alert
-            alerts = detect_anomalies(feature_vectors)
-            
-            # 记录和打印告警
-            for alert in alerts:
-                log_alert(alert)
-                print_alert(alert)
-                store_alert(alert)
-            
-            # 存储流量特征
-            for fv in feature_vectors:
-                store_feature_vector(fv)
-            
-            # 存储关键数据包（可选，限制数量）
-            for pkt in parsed_packets[:10]:  # 只存储前10个数据包
-                store_packet(pkt)
-            
-            if feature_vectors:
-                fv_df = pd.DataFrame([
-                    {
-                        "window_start": fv.window_start,
-                        "window_end": fv.window_end,
-                        "src_ip": fv.src_ip,
-                        "dst_ip": fv.dst_ip,
-                        "src_port": fv.src_port,
-                        "dst_port": fv.dst_port,
-                        "protocol": fv.protocol,
-                        "packet_count": fv.statistical.packet_count,
-                        "byte_count": fv.statistical.byte_count,
-                        "syn_count": fv.statistical.syn_count,
-                    }
-                    for fv in feature_vectors
-                ])
+        captured_packets = st.session_state.capture_manager.get_packets()
+        if captured_packets:
+            try:
+                st.write(f"[调试] 处理 {len(captured_packets)} 个数据包")
                 
-                # 流量趋势图表
-                st.markdown("**流量趋势**")
-                window_stats = (
-                    fv_df.groupby(["window_start", "window_end"], as_index=False)["packet_count"].sum()
-                )
-                window_stats = window_stats.sort_values("window_start")
-                window_stats_display = window_stats.set_index("window_start")["packet_count"]
-                st.line_chart(window_stats_display)
+                # 只处理最近的数据包
+                recent_packets = captured_packets[-100:]
                 
-                # 协议分布饼图
-                st.markdown("**协议分布**")
-                protocol_dist = fv_df.groupby("protocol")["packet_count"].sum()
-                st.pyplot(protocol_dist.plot.pie(autopct='%1.1f%%', figsize=(5, 5)).figure)
+                # Parser：PacketEvent → ParsedPacket
+                parsed_packets: List[ParsedPacket] = []
+                for i, evt in enumerate(recent_packets):
+                    try:
+                        pkt = parse_packet(evt)
+                        if pkt is not None:
+                            parsed_packets.append(pkt)
+                    except Exception as e:
+                        print(f"[DEBUG] 解析数据包 {i} 失败: {e}")
                 
-                # Top-N 流量
-                st.markdown("**Top-N 流量**")
-                top_flows = (
-                    fv_df.sort_values("packet_count", ascending=False)
-                    .head(10)[
-                        [
-                            "src_ip",
-                            "dst_ip",
-                            "src_port",
-                            "dst_port",
-                            "protocol",
-                            "packet_count",
-                            "byte_count",
-                        ]
-                    ]
-                )
-                st.dataframe(top_flows, use_container_width=True)
+                st.write(f"[调试] 成功解析 {len(parsed_packets)} 个数据包")
+                
+                if not parsed_packets:
+                    st.info("没有解析到有效的数据包")
+                    continue_processing = False
+                else:
+                    continue_processing = True
+                
+                if continue_processing:
+                    # Feature：ParsedPacket → FeatureVector（5 元组 + 时间窗口聚合）
+                    feature_vectors: List[FeatureVector] = extract_features(parsed_packets, window_seconds=5.0)
+                    
+                    st.write(f"[调试] 生成 {len(feature_vectors)} 个特征向量")
+                    
+                    if not feature_vectors:
+                        st.info("没有生成有效的特征向量")
+                        continue_processing = False
+                
+                if continue_processing:
+                    # Detection：FeatureVector → Alert
+                    alerts = detect_anomalies(feature_vectors)
+                    
+                    # 记录和打印告警
+                    for alert in alerts:
+                        log_alert(alert)
+                        print_alert(alert)
+                        store_alert(alert)
+                    
+                    # 存储流量特征
+                    for fv in feature_vectors:
+                        store_feature_vector(fv)
+                    
+                    # 存储关键数据包（可选，限制数量）
+                    for pkt in parsed_packets[:10]:  # 只存储前10个数据包
+                        store_packet(pkt)
+                    
+                    # 创建特征向量DataFrame，处理可能的空值
+                    fv_data = []
+                    for fv in feature_vectors:
+                        if fv.statistical is not None:
+                            fv_data.append({
+                                "window_start": fv.window_start,
+                                "window_end": fv.window_end,
+                                "src_ip": fv.src_ip or "unknown",
+                                "dst_ip": fv.dst_ip or "unknown",
+                                "src_port": fv.src_port or 0,
+                                "dst_port": fv.dst_port or 0,
+                                "protocol": fv.protocol or "unknown",
+                                "packet_count": fv.statistical.packet_count or 0,
+                                "byte_count": fv.statistical.byte_count or 0,
+                                "syn_count": fv.statistical.syn_count or 0,
+                            })
+                    
+                    if fv_data:
+                        fv_df = pd.DataFrame(fv_data)
+                        st.write(f"[调试] 创建了 {len(fv_df)} 行的DataFrame")
+                        
+                        # 流量趋势图表 - 使用Streamlit内置图表，更可靠
+                        st.markdown("**流量趋势**")
+                        try:
+                            window_stats = fv_df.groupby(["window_start", "window_end"], as_index=False)["packet_count"].sum()
+                            window_stats = window_stats.sort_values("window_start")
+                            
+                            if not window_stats.empty:
+                                st.line_chart(window_stats, x="window_start", y="packet_count", use_container_width=True)
+                            else:
+                                st.info("没有足够的数据生成流量趋势图表")
+                        except Exception as e:
+                            st.error(f"流量趋势图表错误: {e}")
+                        
+                        # 协议分布 - 使用Streamlit内置的bar_chart代替pyplot
+                        st.markdown("**协议分布**")
+                        try:
+                            protocol_dist = fv_df["protocol"].value_counts()
+                            if not protocol_dist.empty:
+                                st.bar_chart(protocol_dist, use_container_width=True)
+                            else:
+                                st.info("没有足够的数据生成协议分布图表")
+                        except Exception as e:
+                            st.error(f"协议分布图表错误: {e}")
+                        
+                        # Top-N 流量
+                        st.markdown("**Top-N 流量**")
+                        try:
+                            top_flows = fv_df.sort_values("packet_count", ascending=False).head(10)[[
+                                "src_ip", "dst_ip", "src_port", "dst_port", "protocol", "packet_count", "byte_count"
+                            ]]
+                            st.dataframe(top_flows, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Top-N 流量图表错误: {e}")
+                    else:
+                        st.info("没有有效的统计数据")
+                    
+            except Exception as e:
+                st.error(f"数据处理错误: {str(e)}")
+                import traceback
+                st.write("错误详情:")
+                st.code(traceback.format_exc(), language="text")
     
     # 实时告警
     with col_alerts:
