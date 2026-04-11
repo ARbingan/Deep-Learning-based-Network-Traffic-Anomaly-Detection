@@ -33,6 +33,10 @@ if 'captured_packets' not in st.session_state:
     st.session_state.captured_packets = []
 if 'last_update' not in st.session_state:
     st.session_state.last_update = time.time()
+if 'auto_refresh' not in st.session_state:
+    st.session_state.auto_refresh = True  # 默认开启自动刷新
+if 'refresh_interval' not in st.session_state:
+    st.session_state.refresh_interval = 0.1  # 默认100ms
 
 st.title("基于 Scapy 的网络异常流量检测器")
 
@@ -224,9 +228,42 @@ if source_mode == "实时抓包" and st.session_state.capture_running:
     with col_dashboard:
         st.subheader("实时仪表盘")
         
-        # 添加醒目的刷新按钮
-        if st.button("🔄 手动刷新数据", key="manual_refresh", type="primary", help="点击刷新获取最新捕获的数据包"):
-            st.rerun()
+        # 刷新控制区域
+        refresh_col1, refresh_col2 = st.columns([1, 2])
+        with refresh_col1:
+            # 手动刷新按钮
+            if st.button("🔄 手动刷新", key="manual_refresh", type="primary", help="点击刷新获取最新捕获的数据包"):
+                st.rerun()
+        
+        # 自动刷新设置
+        auto_refresh_container = st.container()
+        with auto_refresh_container:
+            col_auto, col_interval = st.columns([1, 2])
+            with col_auto:
+                # 自动刷新开关
+                st.session_state.auto_refresh = st.checkbox("自动刷新", value=st.session_state.auto_refresh, help="启用或禁用自动刷新")
+            with col_interval:
+                # 时间间隔选择下拉列表
+                if st.session_state.auto_refresh:
+                    interval_options = {
+                        "100ms": 0.1,
+                        "500ms": 0.5,
+                        "1s": 1.0,
+                        "2s": 2.0,
+                        "5s": 5.0
+                    }
+                    selected_option = st.selectbox(
+                        "刷新间隔",
+                        options=list(interval_options.keys()),
+                        index=list(interval_options.values()).index(st.session_state.refresh_interval),
+                        help="选择自动刷新的时间间隔"
+                    )
+                    
+                    # 当选择新的时间间隔时，立即更新并重置last_update
+                    new_interval = interval_options[selected_option]
+                    if new_interval != st.session_state.refresh_interval:
+                        st.session_state.refresh_interval = new_interval
+                        st.session_state.last_update = time.time()  # 立即重置上次更新时间
         
         # 显示抓包状态
         st.info(f"正在接口 {iface} 上抓包...")
@@ -262,10 +299,27 @@ if source_mode == "实时抓包" and st.session_state.capture_running:
         # 检查抓包线程健康状态，确保持续运行
         st.session_state.capture_manager.check_health()
         
-        # 定期更新界面 - 缩短更新间隔到0.5秒，提高实时性
-        if time.time() - st.session_state.last_update > 0.5:
-            st.session_state.last_update = time.time()
-            st.rerun()
+        # 使用更可靠的自动刷新机制 - 基于请求计数
+        if 'refresh_count' not in st.session_state:
+            st.session_state.refresh_count = 0
+        
+        # 立即显示当前刷新计数和间隔（用于调试）
+        st.write(f"当前刷新计数: {st.session_state.refresh_count}")
+        st.write(f"当前刷新间隔: {st.session_state.refresh_interval}秒")
+        
+        # 自动刷新逻辑
+        if st.session_state.auto_refresh:
+            # 获取当前时间
+            current_time = time.time()
+            
+            # 检查是否需要刷新
+            if current_time - st.session_state.last_update > st.session_state.refresh_interval:
+                # 增加刷新计数
+                st.session_state.refresh_count += 1
+                # 更新上次刷新时间
+                st.session_state.last_update = current_time
+                # 使用强制刷新
+                st.experimental_rerun() if hasattr(st, 'experimental_rerun') else st.rerun()
     
     # 实时图表
     with col_charts:
@@ -518,13 +572,55 @@ else:
 
     with col_alerts:
         st.subheader("异常告警（Sink 日志视图）")
+        
+        # 1. 添加恶意流量仪表
+        st.markdown("### 恶意流量检测概览")
+        
+        # 计算恶意流量包数量和攻击模式
+        attack_types = {}
+        if 'alerts' in locals() or 'alerts' in globals():
+            total_malicious_packets = len(alerts)
+            if alerts:
+                # 使用更安全的方式统计攻击类型
+                for alert in alerts:
+                    if hasattr(alert, 'alert_type'):
+                        alert_type = alert.alert_type
+                        attack_types[alert_type] = attack_types.get(alert_type, 0) + 1
+            total_attack_types = len(attack_types)
+        else:
+            total_malicious_packets = 0
+            total_attack_types = 0
+        
+        # 创建两列布局展示仪表
+        meter_col1, meter_col2 = st.columns(2)
+        
+        with meter_col1:
+            st.metric("检测到的恶意流量包", total_malicious_packets)
+            st.markdown("**恶意流量包**：系统检测到的可疑网络数据包数量")
+        
+        with meter_col2:
+            st.metric("检测到的攻击模式", total_attack_types)
+            st.markdown("**攻击模式**：系统识别出的不同类型网络攻击数量")
+        
+        # 2. 显示攻击模式详情
+        if attack_types:
+            st.markdown("### 攻击模式分布")
+            attack_df = pd.DataFrame(list(attack_types.items()), columns=['攻击类型', '检测次数'])
+            st.bar_chart(attack_df, x='攻击类型', y='检测次数', use_container_width=True)
+        else:
+            st.info("当前未检测到攻击模式")
+        
+        # 3. 缩小后的告警日志列表
+        st.markdown("### 告警日志（最近20条）")
         alerts_log = pathlib.Path("data/alerts.log")
         if alerts_log.exists():
-            st.write("最近日志内容：")
             with alerts_log.open("r", encoding="utf-8") as f:
-                lines = f.readlines()[-50:]
-            for line in lines:
-                st.code(line.strip(), language="json")
+                lines = f.readlines()[-20:]  # 只显示最近20条
+            if lines:
+                for line in lines:
+                    st.code(line.strip(), language="json")
+            else:
+                st.write("告警日志为空")
         else:
             st.write("当前尚无告警日志。")
 
