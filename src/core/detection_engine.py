@@ -320,50 +320,67 @@ class MLModel:
         except Exception as e:
             print(f"Error saving model: {e}")
 
-    def extract_features(self, feature_vector: FeatureVector) -> np.ndarray:
-        """
-        从特征向量中提取机器学习特征。
-        """
-        stat = feature_vector.statistical
-        proto = feature_vector.protocol_features
-        attack = feature_vector.attack
-        
-        features = [
-            stat.packet_count,
-            stat.byte_count,
-            stat.avg_pkt_len,
-            stat.max_pkt_len,
-            stat.min_pkt_len,
-            stat.std_pkt_len,
-            stat.packet_rate,
-            stat.byte_rate,
-            stat.inter_arrival_time,
-            stat.syn_count,
-            stat.ack_count,
-            stat.fin_count,
-            stat.rst_count,
-            proto.header_size,
-            proto.payload_size,
-            proto.ttl_avg,
-            proto.ttl_min,
-            proto.ttl_max,
-            proto.tcp_window_size_avg,
-            proto.tcp_window_size_max,
-            proto.payload_entropy,
-            int(proto.is_fragmented),
-            int(attack.is_ddos),
-            int(attack.is_port_scan),
-            int(attack.is_syn_flood),
-            int(attack.is_udp_flood),
-            int(attack.is_icmp_flood),
-            attack.connection_count,
-            attack.unique_dst_ports,
-            attack.unique_src_ips,
-            attack.packet_burst_score,
-            attack.scan_pattern_score
+    def _feature_row(self, fv: FeatureVector) -> list:
+        """提取单条特征行（list），供 extract_features / predict_batch 复用。"""
+        stat = fv.statistical
+        proto = fv.protocol_features
+        attack = fv.attack
+        return [
+            stat.packet_count, stat.byte_count, stat.avg_pkt_len,
+            stat.max_pkt_len, stat.min_pkt_len, stat.std_pkt_len,
+            stat.packet_rate, stat.byte_rate, stat.inter_arrival_time,
+            stat.syn_count, stat.ack_count, stat.fin_count, stat.rst_count,
+            proto.header_size, proto.payload_size,
+            proto.ttl_avg, proto.ttl_min, proto.ttl_max,
+            proto.tcp_window_size_avg, proto.tcp_window_size_max,
+            proto.payload_entropy, int(proto.is_fragmented),
+            int(attack.is_ddos), int(attack.is_port_scan),
+            int(attack.is_syn_flood), int(attack.is_udp_flood),
+            int(attack.is_icmp_flood), attack.connection_count,
+            attack.unique_dst_ports, attack.unique_src_ips,
+            attack.packet_burst_score, attack.scan_pattern_score,
         ]
-        
-        return np.array(features).reshape(1, -1)
+
+    def extract_features(self, feature_vector: FeatureVector) -> np.ndarray:
+        """从特征向量中提取机器学习特征（单条，shape=(1, n_features)）。"""
+        return np.array(self._feature_row(feature_vector)).reshape(1, -1)
+
+    def predict_batch(
+        self, feature_vectors: List[FeatureVector]
+    ) -> List[Tuple[Optional[Alert], float]]:
+        """
+        D1 优化：批量推理，一次 predict_proba 替代 N 次单条推理。
+        返回与 feature_vectors 等长的 [(Alert|None, prob)] 列表。
+        """
+        if not feature_vectors or self.model is None:
+            return [(None, 0.0)] * len(feature_vectors)
+        try:
+            X = np.array([self._feature_row(fv) for fv in feature_vectors], dtype=float)
+            X_scaled = self.scaler.transform(X)
+            if hasattr(self.model, "predict_proba"):
+                probs = self.model.predict_proba(X_scaled)[:, 1]
+            else:
+                probs = self.model.predict(X_scaled).astype(float)
+
+            results: List[Tuple[Optional[Alert], float]] = []
+            for fv, prob in zip(feature_vectors, probs):
+                prob = float(prob)
+                if prob > 0.5:
+                    alert = Alert(
+                        timestamp=datetime.now(),
+                        src_ip=fv.src_ip,
+                        dst_ip=fv.dst_ip,
+                        alert_type="ML Anomaly",
+                        score=prob * 100,
+                        detail={"anomaly_prob": prob, "model_type": self.model_type},
+                    )
+                    results.append((alert, prob))
+                else:
+                    results.append((None, prob))
+            return results
+        except Exception as e:
+            print(f"[MLModel.predict_batch] {e}")
+            return [(None, 0.0)] * len(feature_vectors)
 
     def train(self, X: np.ndarray, y: np.ndarray):
         """
@@ -672,33 +689,62 @@ class DetectionEngine:
 
     def batch_detect(self, feature_vectors: List[FeatureVector]) -> List[Alert]:
         """
-        批量检测。
-        
-        参数：
-            feature_vectors: 特征向量列表
-        
-        返回：
-            List[Alert]: 检测到的告警列表
+        批量检测（D1 优化版）。
+
+        流程：
+        1. 规则匹配：逐条（快速，无法向量化）
+        2. ML 推理：一次 predict_proba 批量完成，替代 N 次单条调用
+        3. 融合：规则优先，ML 补充
         """
-        alerts = []
-        
-        for fv in feature_vectors:
-            alert = self.detect(fv)
-            if alert:
-                alerts.append(alert)
-        
-        # 计算性能并调整阈值
+        if not feature_vectors:
+            return []
+
+        threshold = self.threshold_controller.get_threshold()
+        alerts: List[Alert] = []
+
+        # --- 步骤 1：批量 ML 推理 ---
+        ml_results = self.ml_model.predict_batch(feature_vectors)
+
+        # --- 步骤 2：逐条规则匹配 + 融合 ---
+        for fv, (ml_alert, ml_prob) in zip(feature_vectors, ml_results):
+            rule_alerts = self.rule_matcher.match(fv)
+
+            all_candidates: List[Tuple[Alert, float, float, int, str]] = []
+
+            for alert, weight, priority in rule_alerts:
+                confidence = self.threshold_controller.calculate_confidence(alert, "rule")
+                all_candidates.append((alert, confidence, weight, priority, "rule"))
+
+            if ml_alert:
+                confidence = self.threshold_controller.calculate_confidence(ml_alert, "ml")
+                all_candidates.append((ml_alert, confidence, 0.8, 3, "ml"))
+
+            if not all_candidates:
+                continue
+
+            all_candidates.sort(key=lambda x: (x[3], x[1]), reverse=True)
+            best_alert, best_confidence, _, _, detector_type = all_candidates[0]
+
+            if best_confidence >= threshold:
+                best_alert.detail.update({
+                    "confidence": best_confidence,
+                    "detector_type": detector_type,
+                    "threshold": threshold,
+                })
+                self.detection_history.append({
+                    "alert": best_alert,
+                    "confidence": best_confidence,
+                    "detector_type": detector_type,
+                    "timestamp": datetime.now(),
+                })
+                alerts.append(best_alert)
+
+        # 调整阈值
         if alerts:
-            # 简化的性能计算
-            # 实际应用中应该使用真实的标签
-            performance = {
-                'fpr': 0.05,  # 假设误报率
-                'tpr': 0.9,   # 假设召回率
-                'precision': 0.85,  # 假设精确率
-                'recall': 0.9       # 假设召回率
-            }
-            self.threshold_controller.adjust_threshold(performance)
-        
+            self.threshold_controller.adjust_threshold(
+                {"fpr": 0.05, "tpr": 0.9, "precision": 0.85, "recall": 0.9}
+            )
+
         return alerts
 
     def train_model(self, X: np.ndarray, y: np.ndarray):

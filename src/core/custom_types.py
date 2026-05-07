@@ -35,6 +35,9 @@ class ParsedPacket:
     tcp_flags: Optional[str]
     ttl: Optional[int]
     payload_len: Optional[int]
+    tcp_window: Optional[int] = None
+    is_fragmented: bool = False
+    payload_sample: Optional[bytes] = None  # 前若干字节，用于熵计算
 
 
 @dataclass
