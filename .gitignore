@@ -10,9 +10,13 @@ models/
 
 # 忽略虚拟环境
 .venv/
+.venv312/
 
 # 忽略IDE文件
 .vscode/
+
+# 忽略Claude Code内部文件
+.claude/
 
 # 忽略临时文件
 *.pyc
@@ -21,6 +25,23 @@ __pycache__/
 # 忽略日志文件
 *.log
 
+# 忽略输出数据
+*.csv
+
 # 忽略其他临时文件
 .DS_Store
 Thumbs.db
+AGENTS.md
+tmp_check.py
+roo_task_*.md
+
+# 忽略大型测试数据
+IDS2018_change_PCAP/
+IDS2018_change_PCAP.zip
+
+# 忽略训练输出文本
+ml模型训练结果.txt
+训练结果2.txt
+
+# 忽略工具脚本
+SwitchToDeepSeek.ps1

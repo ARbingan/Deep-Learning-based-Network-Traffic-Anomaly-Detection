@@ -180,7 +180,7 @@ def main():
             stride=config['stride'],
             batch_size=config['batch_size'],
             val_split=0.0,
-            test_split=0.0,
+            test_split=1.0,
             labels=test_labels,
             use_rule_labels=False,
             normalize=config['normalize']
@@ -204,7 +204,8 @@ def main():
     print("\n" + "=" * 60)
     print("训练完成！")
     print(f"模型保存到: {args.model_save_path}")
-    print(f"测试集F1分数: {metrics['f1']:.4f}")
+    if 'metrics' in dir():
+        print(f"测试集F1分数: {metrics['f1']:.4f}")
     print("=" * 60)
 
 

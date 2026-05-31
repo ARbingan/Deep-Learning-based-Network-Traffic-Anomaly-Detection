@@ -490,7 +490,7 @@ else:
                 events = list(pcap_source(str(local_path)))
 
                 # Parser：PacketEvent → ParsedPacket
-                parsed_packets: List[ParsedPacket] = [parse_packet(evt) for evt in events]
+                parsed_packets: List[ParsedPacket] = parse_packets(events)
 
                 # Feature：ParsedPacket → FeatureVector（5 元组 + 时间窗口聚合）
                 feature_vectors: List[FeatureVector] = extract_features(parsed_packets, window_seconds=5.0)
@@ -516,6 +516,35 @@ else:
                 st.markdown("**检测性能**")
                 performance = get_detection_performance()
                 st.write(performance)
+
+                # 添加生成报告按钮
+                st.markdown("**报告生成**")
+                if st.button("生成分析报告"):
+                    st.info("正在生成分析报告...")
+                    # 执行分析脚本
+                    import subprocess
+                    import sys
+                    result = subprocess.run([sys.executable, "../scripts/analyze_pcap_report.py"], 
+                                           capture_output=True, text=True, cwd=".")
+                    
+                    if result.returncode == 0:
+                        st.success("报告生成成功！")
+                        # 提供报告下载
+                        report_path = pathlib.Path("data/pcap_analysis_report.md")
+                        if report_path.exists():
+                            with open(report_path, "r", encoding="utf-8") as f:
+                                report_content = f.read()
+                            st.download_button(
+                                label="下载报告",
+                                data=report_content,
+                                file_name="pcap_analysis_report.md",
+                                mime="text/markdown"
+                            )
+                            # 提供报告预览
+                            with st.expander("查看报告内容"):
+                                st.markdown(report_content)
+                    else:
+                        st.error(f"报告生成失败：{result.stderr}")
 
                 if feature_vectors:
                     fv_df = pd.DataFrame([

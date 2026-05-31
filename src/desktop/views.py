@@ -526,7 +526,7 @@ class PcapView(ScrollablePage):
         drop_card = Card()
         self.drop_zone = DropZone()
         self.drop_zone.setMinimumHeight(160)
-        self.drop_zone.file_dropped.connect(self._analyze)
+        self.drop_zone.files_dropped.connect(self._analyze)
         drop_card.layout_box().addWidget(self.drop_zone)
 
         btn_row = QHBoxLayout()
@@ -534,7 +534,7 @@ class PcapView(ScrollablePage):
         self.browse_btn = QPushButton("选择文件…")
         self.browse_btn.setObjectName("Primary")
         self.browse_btn.setCursor(Qt.PointingHandCursor)
-        self.browse_btn.clicked.connect(self._choose_file)
+        self.browse_btn.clicked.connect(self._choose_files)
         btn_row.addStretch(1)
         btn_row.addWidget(self.browse_btn)
         btn_row.addStretch(1)
@@ -642,24 +642,26 @@ class PcapView(ScrollablePage):
         root.addWidget(self.result_card)
         root.addStretch(1)
 
-    def _choose_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
+    def _choose_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "选择 PCAP 文件",
+            "选择 PCAP 文件（可多选）",
             "",
             "PCAP 文件 (*.pcap *.pcapng *.cap);;所有文件 (*)",
         )
-        if path:
-            self._analyze(path)
+        if paths:
+            self._analyze(paths)
 
-    def _analyze(self, path: str) -> None:
+    def _analyze(self, paths) -> None:
         if self._thread is not None:
             return
-        self.state.pcap_path = path
-        self.progress_label.setText(f"正在分析：{path}")
+        if isinstance(paths, str):
+            paths = [paths]
+        self.state.pcap_path = paths[0]
+        label = paths[0] if len(paths) == 1 else f"{len(paths)} 个文件"
+        self.progress_label.setText(f"正在分析：{label}")
         self.progress_bar.setValue(0)
         self.browse_btn.setEnabled(False)
-        # 重置可视化
         self.timeline_chart.clear()
         self.timeline_hint.setText("分析中…")
         self.attack_donut.set_data({})
@@ -667,7 +669,7 @@ class PcapView(ScrollablePage):
         self.attack_hint.setText("分析中…")
         self.result_table.setRowCount(0)
 
-        worker = PcapWorker(path)
+        worker = PcapWorker(paths)
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)

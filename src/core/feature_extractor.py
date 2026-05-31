@@ -7,9 +7,10 @@
 - 攻击特征（DDoS模式、扫描行为等）
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Optional
 import math
 import numpy as np
+from multiprocessing import Pool, cpu_count
 
 from .custom_types import ParsedPacket, FeatureVector, StatisticalFeatures, ProtocolFeatures, AttackFeatures
 
@@ -211,9 +212,18 @@ class AttackFeatureExtractor:
     """
 
     @staticmethod
-    def extract(packets: List[ParsedPacket]) -> AttackFeatures:
+    def extract(
+        packets: List[ParsedPacket],
+        statistical: Optional["StatisticalFeatures"] = None,
+    ) -> AttackFeatures:
         """
         提取攻击特征。
+
+        参数：
+            packets:     解析后的数据包列表
+            statistical: 已计算好的统计特征（可选）。
+                         传入时直接复用，避免重复计算；
+                         不传时内部自行计算（向后兼容）。
 
         特征包括：
         - DDoS 检测：高包速率、大量连接
@@ -239,8 +249,10 @@ class AttackFeatureExtractor:
                 scan_pattern_score=0.0,
             )
 
-        statistical = StatisticalFeatureExtractor.extract(packets)
-        
+        # 复用已算好的统计特征，避免重复遍历
+        if statistical is None:
+            statistical = StatisticalFeatureExtractor.extract(packets)
+
         syn_count = statistical.syn_count
         total_count = statistical.packet_count
         packet_rate = statistical.packet_rate
@@ -254,7 +266,8 @@ class AttackFeatureExtractor:
         
         is_port_scan = unique_dst_ports > 10 and total_count < 1000
 
-        is_ddos = (packet_rate > 1000 or 
+        is_ddos = (
+                   (packet_rate > 1000 and unique_src_ips > 5) or
                    (unique_src_ips > 5 and total_count > 10000) or
                    is_syn_flood or is_udp_flood or is_icmp_flood)
 
@@ -337,9 +350,45 @@ class AttackFeatureExtractor:
         return min(density, 1.0)
 
 
+def _process_bucket(args: Tuple[int, str, str, int, int, str, List[ParsedPacket], float]) -> FeatureVector:
+    """
+    处理单个分组的特征提取（用于并行处理）
+    
+    参数：
+        args: 包含分组信息的元组
+    
+    返回：
+        FeatureVector: 特征向量
+    """
+    win_index, src_ip, dst_ip, src_port, dst_port, protocol, bucket_packets, window_seconds = args
+
+    window_start = win_index * window_seconds
+    window_end = window_start + window_seconds
+
+    # C1 优化：先算统计特征，再传给攻击特征提取器复用，避免重复遍历
+    statistical = StatisticalFeatureExtractor.extract(bucket_packets)
+    protocol_features = ProtocolFeatureExtractor.extract(bucket_packets)
+    attack = AttackFeatureExtractor.extract(bucket_packets, statistical=statistical)
+
+    return FeatureVector(
+        window_start=window_start,
+        window_end=window_end,
+        src_ip=src_ip,
+        dst_ip=dst_ip,
+        src_port=src_port,
+        dst_port=dst_port,
+        protocol=protocol,
+        statistical=statistical,
+        protocol_features=protocol_features,
+        attack=attack,
+        extra={},
+    )
+
+
 def extract_features(
     packets: List[ParsedPacket],
     window_seconds: float = 5.0,
+    use_parallel: bool = True,
 ) -> List[FeatureVector]:
     """
     将 ParsedPacket 序列按 5 元组 + 时间窗口聚合，并提取多维度特征。
@@ -347,6 +396,7 @@ def extract_features(
     参数：
         packets: 解析后的数据包列表
         window_seconds: 时间窗口大小（秒）
+        use_parallel: 是否使用并行处理
 
     返回：
         FeatureVector 列表，包含统计特征、协议特征和攻击特征
@@ -374,29 +424,18 @@ def extract_features(
             buckets[key] = []
         buckets[key].append(p)
 
-    feature_vectors: List[FeatureVector] = []
-
+    # 准备并行处理的参数
+    process_args = []
     for (win_index, src_ip, dst_ip, src_port, dst_port, protocol), bucket_packets in buckets.items():
-        window_start = win_index * window_seconds
-        window_end = window_start + window_seconds
+        process_args.append((win_index, src_ip, dst_ip, src_port, dst_port, protocol, bucket_packets, window_seconds))
 
-        statistical = StatisticalFeatureExtractor.extract(bucket_packets)
-        protocol_features = ProtocolFeatureExtractor.extract(bucket_packets)
-        attack = AttackFeatureExtractor.extract(bucket_packets)
-
-        fv = FeatureVector(
-            window_start=window_start,
-            window_end=window_end,
-            src_ip=src_ip,
-            dst_ip=dst_ip,
-            src_port=src_port,
-            dst_port=dst_port,
-            protocol=protocol,
-            statistical=statistical,
-            protocol_features=protocol_features,
-            attack=attack,
-            extra={},
-        )
-        feature_vectors.append(fv)
+    if use_parallel and len(process_args) > 1:
+        # 使用多进程池并行处理
+        num_processes = min(cpu_count(), len(process_args))
+        with Pool(processes=num_processes) as pool:
+            feature_vectors = pool.map(_process_bucket, process_args)
+    else:
+        # 串行处理
+        feature_vectors = [_process_bucket(args) for args in process_args]
 
     return feature_vectors

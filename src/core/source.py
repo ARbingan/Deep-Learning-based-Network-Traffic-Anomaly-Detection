@@ -190,11 +190,50 @@ def get_available_interfaces() -> list:
 
 def pcap_source(path: str) -> Iterable[PacketEvent]:
     """
-    PcapSource：从离线 pcap 文件读取，输出 PacketEvent 流。
+    PcapSource：从离线 pcap 文件流式读取，输出 PacketEvent 流。
+
+    A1+A2 优化：
+    - A1：保持流式 yield，不 list() 全量加载，内存占用与文件大小无关
+    - A2：优先用 dpkt 做最小字段解析（速度比 Scapy 快 3-5x）；
+          dpkt 不可用时自动回退到 Scapy PcapReader（向后兼容）
     """
-    packets = rdpcap(path)
-    return [
-        PacketEvent(timestamp=float(pkt.time), raw_packet=pkt)
-        for pkt in packets
-    ]
+    try:
+        import dpkt  # type: ignore  # noqa: F401
+        yield from _pcap_source_dpkt(path)
+    except ImportError:
+        yield from _pcap_source_scapy(path)
+
+
+def _pcap_source_dpkt(path: str) -> Iterable[PacketEvent]:
+    """
+    用 dpkt 流式读取 pcap，速度比 Scapy 快 3-5x。
+    raw_packet 存储 dpkt.ethernet.Ethernet 对象（或 bytes，若解析失败）。
+    """
+    import dpkt  # type: ignore
+
+    with open(path, "rb") as f:
+        try:
+            reader = dpkt.pcap.Reader(f)
+        except Exception:
+            # 尝试 pcapng 格式
+            f.seek(0)
+            reader = dpkt.pcapng.Reader(f)
+
+        for ts, buf in reader:
+            try:
+                eth = dpkt.ethernet.Ethernet(buf)
+                yield PacketEvent(timestamp=float(ts), raw_packet=eth)
+            except Exception:
+                # 解析失败时把原始 bytes 传下去，parser 层会跳过
+                yield PacketEvent(timestamp=float(ts), raw_packet=buf)
+
+
+def _pcap_source_scapy(path: str) -> Iterable[PacketEvent]:
+    """
+    用 Scapy PcapReader 流式读取（fallback）。
+    """
+    from scapy.all import PcapReader
+    with PcapReader(path) as pcap_reader:
+        for pkt in pcap_reader:
+            yield PacketEvent(timestamp=float(pkt.time), raw_packet=pkt)
 

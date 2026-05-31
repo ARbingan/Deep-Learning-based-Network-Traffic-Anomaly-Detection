@@ -1,12 +1,8 @@
 """
-Dash Web 前端入口。
+Dash Web 前端应用模块。
 
-运行方式：
-    cd src
-    python web/app.py
-
-或从项目根目录：
-    python src/web/app.py
+从项目根目录启动：
+    python DashWeb.py
 """
 
 from __future__ import annotations

@@ -191,42 +191,35 @@ class CaptureWorker(QObject):
 
 class PcapWorker(QObject):
     """
-    PCAP 离线分析 worker。跑完整 pipeline 后一次性返回。
+    PCAP 离线分析 worker，支持单个或多个文件合并分析。
     """
 
     progress = pyqtSignal(int, int)         # (current, total)
     done = pyqtSignal(list, list, list)     # (List[PacketSummary], feature_vectors, alerts)
     error = pyqtSignal(str)
 
-    def __init__(self, path: str, window_seconds: float = 5.0):
+    def __init__(self, paths, window_seconds: float = 5.0):
         super().__init__()
-        self._path = path
+        self._paths: List[str] = [paths] if isinstance(paths, str) else list(paths)
         self._window_seconds = window_seconds
 
     def run(self) -> None:
-        """
-        E1+E3 优化版：
-        - E1：ParsedPacket 用完后立即释放（不保留到 done 信号）
-        - E3：done 信号传 List[PacketSummary]（轻量摘要），而非完整 ParsedPacket
-        - A1：pcap_source 已是流式 yield，这里改为流式处理，不再 list() 全量加载
-        """
         try:
-            # A1：流式读取，先做一次预扫描获取总数（用于进度条）
-            # 注意：pcap_source 是生成器，需要两次遍历；用 list() 缓存 events
-            # 但 events 只存 PacketEvent（含 dpkt/Scapy 对象），比 ParsedPacket 更轻
-            events: List[PacketEvent] = list(pcap_source(self._path))
-            total = len(events)
+            # 收集所有文件的 events
+            all_events: List[PacketEvent] = []
+            for path in self._paths:
+                all_events.extend(pcap_source(path))
+
+            total = len(all_events)
             if total == 0:
                 self.done.emit([], [], [])
                 return
 
-            # 解析阶段：构建 ParsedPacket 列表（用于特征提取）
-            # 同时构建轻量 PacketSummary 列表（用于 UI 渲染）
             parsed: List[ParsedPacket] = []
             summaries: List[PacketSummary] = []
             step = max(total // 20, 1)
 
-            for i, ev in enumerate(events):
+            for i, ev in enumerate(all_events):
                 p = parse_packet(ev)
                 parsed.append(p)
                 summaries.append(PacketSummary(
@@ -234,20 +227,15 @@ class PcapWorker(QObject):
                     protocol=p.protocol,
                     timestamp=p.timestamp,
                 ))
-                # E1：释放 raw_packet（Scapy/dpkt 对象），减少内存占用
                 ev.raw_packet = None  # type: ignore[assignment]
                 if i % step == 0:
                     self.progress.emit(i + 1, total)
             self.progress.emit(total, total)
 
-            # 特征提取 + 检测
             fvs = extract_features(parsed, window_seconds=self._window_seconds, use_parallel=False)
             alerts = detect_anomalies(fvs)
-
-            # E1：特征提取完成后释放 ParsedPacket 列表
             del parsed
 
-            # E3：只传摘要给 UI
             self.done.emit(summaries, fvs, alerts)
         except Exception as e:
             self.error.emit(str(e))

@@ -673,9 +673,9 @@ def _nice_ceiling(v: float) -> float:
 # ---------- 拖放区 ----------
 
 class DropZone(QFrame):
-    """PCAP 文件拖放区。"""
+    """PCAP 文件拖放区，支持同时拖入多个文件。"""
 
-    file_dropped = pyqtSignal(str)
+    files_dropped = pyqtSignal(list)   # List[str]
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -687,7 +687,6 @@ class DropZone(QFrame):
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(6)
 
-        # 上传图标（Unicode 箭头）
         icon_label = QLabel("⬆")
         icon_label.setAlignment(Qt.AlignCenter)
         icon_label.setStyleSheet(
@@ -700,7 +699,7 @@ class DropZone(QFrame):
             f"color: {Palette.text_primary}; font-size: 14px; font-weight: 700;"
             f"background: transparent;"
         )
-        subtitle = QLabel("支持 .pcap · .pcapng · .cap 格式")
+        subtitle = QLabel("支持 .pcap · .pcapng · .cap 格式，可同时拖入多个文件")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet(
             f"color: {Palette.text_muted}; font-size: 12px; background: transparent;"
@@ -725,8 +724,10 @@ class DropZone(QFrame):
         self.setProperty("active", "false")
         self.style().unpolish(self)
         self.style().polish(self)
-        urls = event.mimeData().urls()
-        if urls:
-            path = urls[0].toLocalFile()
-            if path.lower().endswith((".pcap", ".pcapng", ".cap")):
-                self.file_dropped.emit(path)
+        paths = [
+            url.toLocalFile()
+            for url in event.mimeData().urls()
+            if url.toLocalFile().lower().endswith((".pcap", ".pcapng", ".cap"))
+        ]
+        if paths:
+            self.files_dropped.emit(paths)

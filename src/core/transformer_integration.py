@@ -5,18 +5,36 @@ Transformer检测器与现有系统的集成模块。
 - TransformerDetector：包装类，兼容现有DetectionEngine接口
 - 序列构建工具：从FeatureVector列表构建输入序列
 - 模型加载和推理功能
+
+注意：torch 为可选依赖，仅在实例化 TransformerDetector 时才加载。
 """
 
-import torch
+from __future__ import annotations
+
 import numpy as np
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
 
 from .custom_types import FeatureVector
 from .sink import Alert
-from .transformer_detector import TinyTransformer
-from .transformer_dataset import extract_feature_vector
+
+if TYPE_CHECKING:
+    import torch  # noqa: F401
+
+
+def _require_torch():
+    """按需导入 torch，并把不友好的 DLL/兼容性错误转成可读消息。"""
+    try:
+        import torch  # type: ignore
+        return torch
+    except Exception as e:  # ImportError、OSError(WinError 1114) 等都归并
+        raise RuntimeError(
+            "Transformer 检测需要 PyTorch，但当前环境加载失败：\n"
+            f"  {type(e).__name__}: {e}\n"
+            "请检查 torch 是否正确安装（Windows 常见原因：torch 版本与 Python/VC++ 运行库不兼容）。\n"
+            "如不需要 Transformer 功能，可以不传 transformer_model_path，系统会自动使用规则 + ML 检测。"
+        ) from e
 
 
 class TransformerDetector:
@@ -49,13 +67,17 @@ class TransformerDetector:
         """
         self.seq_len = seq_len
         self.threshold = threshold
-        
+
+        self._torch = _require_torch()
+        from .transformer_detector import TinyTransformer  # 延迟导入
+        self._TinyTransformer = TinyTransformer
+
         # 设备
         if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.device = self._torch.device("cuda" if self._torch.cuda.is_available() else "cpu")
         else:
-            self.device = torch.device(device)
-        
+            self.device = self._torch.device(device)
+
         # 加载模型
         if Path(model_path).exists():
             self.load_model(model_path)
@@ -71,7 +93,7 @@ class TransformerDetector:
                     'seq_len': seq_len,
                     'dropout': 0.1
                 }
-            self.model = TinyTransformer(**config)
+            self.model = self._TinyTransformer(**config)
             self.model.to(self.device)
             self.model.eval()
         
@@ -92,14 +114,15 @@ class TransformerDetector:
     
     def load_model(self, model_path: str):
         """加载预训练模型"""
+        torch = self._torch
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-        
+
         # 获取配置
         config = checkpoint.get('config', {})
         self.seq_len = config.get('seq_len', self.seq_len)
-        
+
         # 构建模型
-        self.model = TinyTransformer(
+        self.model = self._TinyTransformer(
             feature_dim=config.get('feature_dim', 32),
             d_model=config.get('d_model', 64),
             nhead=config.get('nhead', 4),
@@ -116,7 +139,11 @@ class TransformerDetector:
         
         print(f"模型加载成功：{model_path}")
         print(f"   训练轮次：{checkpoint.get('epoch', 'unknown')}")
-        print(f"   验证F1：{checkpoint.get('val_f1', 'unknown'):.4f}")
+        val_f1 = checkpoint.get('val_f1')
+        if isinstance(val_f1, (int, float)):
+            print(f"   验证F1：{val_f1:.4f}")
+        else:
+            print(f"   验证F1：unknown")
     
     def normalize_features(self, features: np.ndarray) -> np.ndarray:
         """标准化特征"""
@@ -127,67 +154,48 @@ class TransformerDetector:
     def build_sequence(
         self,
         feature_vectors: List[FeatureVector],
-        start_idx: int = 0
-    ) -> Optional[torch.Tensor]:
+        start_idx: int = 0,
+    ):
         """
         从FeatureVector列表构建一个输入序列。
-        
-        参数：
-            feature_vectors: FeatureVector列表（按时间排序）
-            start_idx: 起始索引
-            
+
         返回：
-            [1, seq_len, feature_dim] 的张量，如果数据不足则返回None
+            [1, seq_len, feature_dim] 的张量，如果数据不足则返回 None
         """
+        from .transformer_dataset import extract_feature_vector  # 延迟导入
+        torch = self._torch
+
         if len(feature_vectors) < start_idx + self.seq_len:
             return None
-        
-        # 提取序列
+
         seq_fvs = feature_vectors[start_idx:start_idx + self.seq_len]
-        
-        # 转换为特征向量
+
         seq_features = []
         for fv in seq_fvs:
             feat = extract_feature_vector(fv)
             seq_features.append(feat)
-        
-        seq_features = np.array(seq_features, dtype=np.float32)  # [seq_len, feature_dim]
-        
-        # 标准化
+
+        seq_features = np.array(seq_features, dtype=np.float32)
         seq_features = self.normalize_features(seq_features)
-        
-        # 转为张量
-        tensor = torch.from_numpy(seq_features).unsqueeze(0)  # [1, seq_len, feature_dim]
-        
+
+        tensor = torch.from_numpy(seq_features).unsqueeze(0)
         return tensor.to(self.device)
     
     def predict(self, feature_vectors: List[FeatureVector]) -> List[Tuple[Optional[Alert], float]]:
-        """
-        对一组FeatureVector进行预测。
-        
-        参数：
-            feature_vectors: FeatureVector列表（按时间排序）
-            
-        返回：
-            List of (Alert or None, score)
-        """
+        """对一组 FeatureVector 进行预测。"""
+        torch = self._torch
         results = []
-        
+
         with torch.no_grad():
             for i in range(len(feature_vectors) - self.seq_len + 1):
-                # 构建序列
                 seq_tensor = self.build_sequence(feature_vectors, i)
                 if seq_tensor is None:
                     continue
-                
-                # 推理
+
                 prob = self.model(seq_tensor).item()
                 score = prob * 100.0
-                
-                # 获取当前序列对应的最后一个时间点的信息
                 fv = feature_vectors[i + self.seq_len - 1]
-                
-                # 生成Alert（如果超过阈值）
+
                 if prob >= self.threshold:
                     alert = Alert(
                         timestamp=datetime.now(),
@@ -199,60 +207,48 @@ class TransformerDetector:
                             "anomaly_prob": prob,
                             "model": "TinyTransformer",
                             "seq_start_idx": i,
-                            "threshold": self.threshold
-                        }
+                            "threshold": self.threshold,
+                        },
                     )
                     results.append((alert, score))
                 else:
                     results.append((None, score))
-        
+
         return results
     
     def batch_predict(
         self,
         feature_vectors: List[FeatureVector],
-        batch_size: int = 32
+        batch_size: int = 32,
     ) -> List[Tuple[Optional[Alert], float]]:
-        """
-        批量预测（更高效）。
-        
-        参数：
-            feature_vectors: FeatureVector列表
-            batch_size: 批次大小
-            
-        返回：
-            预测结果列表
-        """
+        """批量预测（更高效）。"""
+        torch = self._torch
         all_results = []
-        
-        # 构建所有序列
+
         sequences = []
         indices = []
         for i in range(len(feature_vectors) - self.seq_len + 1):
             seq_tensor = self.build_sequence(feature_vectors, i)
             if seq_tensor is not None:
-                sequences.append(seq_tensor.squeeze(0))  # 移除batch维度
+                sequences.append(seq_tensor.squeeze(0))
                 indices.append(i)
-        
+
         if not sequences:
             return []
-        
-        # 批量推理
-        batch_tensor = torch.stack(sequences)  # [N, seq_len, feature_dim]
-        
+
+        batch_tensor = torch.stack(sequences)
+
         with torch.no_grad():
-            # 分批次处理（避免显存不足）
             for i in range(0, len(batch_tensor), batch_size):
-                batch = batch_tensor[i:i+batch_size].to(self.device)
+                batch = batch_tensor[i:i + batch_size].to(self.device)
                 probs = self.model(batch).cpu().numpy()
-                
+
                 for j, prob in enumerate(probs):
                     idx = indices[i + j]
                     fv = feature_vectors[idx + self.seq_len - 1]
                     score = float(prob) * 100.0
-                    
+
                     if prob >= self.threshold:
-                        from datetime import datetime
                         alert = Alert(
                             timestamp=datetime.now(),
                             src_ip=fv.src_ip,
@@ -263,13 +259,13 @@ class TransformerDetector:
                                 "anomaly_prob": float(prob),
                                 "model": "TinyTransformer",
                                 "seq_start_idx": idx,
-                                "threshold": self.threshold
-                            }
+                                "threshold": self.threshold,
+                            },
                         )
                         all_results.append((alert, score))
                     else:
                         all_results.append((None, score))
-        
+
         return all_results
     
     def get_attention_weights(self, feature_vectors: List[FeatureVector], idx: int = 0):

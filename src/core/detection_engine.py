@@ -70,12 +70,12 @@ class RuleMatcher:
                 "weight": 0.9
             },
             "packet_flood": {
-                "threshold": 1000,  # 5秒窗口内总包数阈值
+                "threshold": 5000,  # 5秒窗口内总包数阈值
                 "description": "数据包洪水攻击检测",
                 "weight": 0.8
             },
             "byte_flood": {
-                "threshold": 100000,  # 5秒窗口内总字节数阈值
+                "threshold": 5000000,  # 5秒窗口内总字节数阈值（5MB）
                 "description": "字节洪水攻击检测",
                 "weight": 0.8
             },
@@ -156,8 +156,8 @@ class RuleMatcher:
                 }
             ), weight, priority))
 
-        # 检测数据包洪水
-        if stat.packet_count > self.rules["packet_flood"]["threshold"]:
+        # 检测数据包洪水（需多源，排除单源大流量如游戏更新/下载）
+        if stat.packet_count > self.rules["packet_flood"]["threshold"] and attack.unique_src_ips > 3:
             score = min(100.0, stat.packet_count / self.rules["packet_flood"]["threshold"] * 100)
             weight = self.rules["packet_flood"]["weight"]
             priority = self.rule_priority["packet_flood"]
@@ -174,8 +174,8 @@ class RuleMatcher:
                 }
             ), weight, priority))
 
-        # 检测字节洪水
-        if stat.byte_count > self.rules["byte_flood"]["threshold"]:
+        # 检测字节洪水（需多源，排除单源大流量如游戏更新/下载）
+        if stat.byte_count > self.rules["byte_flood"]["threshold"] and attack.unique_src_ips > 3:
             score = min(100.0, stat.byte_count / self.rules["byte_flood"]["threshold"] * 100)
             weight = self.rules["byte_flood"]["weight"]
             priority = self.rule_priority["byte_flood"]
@@ -321,10 +321,9 @@ class MLModel:
             print(f"Error saving model: {e}")
 
     def _feature_row(self, fv: FeatureVector) -> list:
-        """提取单条特征行（list），供 extract_features / predict_batch 复用。"""
+        """提取单条特征行（list），只使用原始统计和协议特征，排除规则派生特征。"""
         stat = fv.statistical
         proto = fv.protocol_features
-        attack = fv.attack
         return [
             stat.packet_count, stat.byte_count, stat.avg_pkt_len,
             stat.max_pkt_len, stat.min_pkt_len, stat.std_pkt_len,
@@ -334,11 +333,6 @@ class MLModel:
             proto.ttl_avg, proto.ttl_min, proto.ttl_max,
             proto.tcp_window_size_avg, proto.tcp_window_size_max,
             proto.payload_entropy, int(proto.is_fragmented),
-            int(attack.is_ddos), int(attack.is_port_scan),
-            int(attack.is_syn_flood), int(attack.is_udp_flood),
-            int(attack.is_icmp_flood), attack.connection_count,
-            attack.unique_dst_ports, attack.unique_src_ips,
-            attack.packet_burst_score, attack.scan_pattern_score,
         ]
 
     def extract_features(self, feature_vector: FeatureVector) -> np.ndarray:
@@ -353,6 +347,13 @@ class MLModel:
         返回与 feature_vectors 等长的 [(Alert|None, prob)] 列表。
         """
         if not feature_vectors or self.model is None:
+            return [(None, 0.0)] * len(feature_vectors)
+        # 检查 scaler 是否已训练
+        from sklearn.exceptions import NotFittedError
+        try:
+            from sklearn.utils.validation import check_is_fitted
+            check_is_fitted(self.scaler)
+        except NotFittedError:
             return [(None, 0.0)] * len(feature_vectors)
         try:
             X = np.array([self._feature_row(fv) for fv in feature_vectors], dtype=float)
@@ -801,8 +802,32 @@ class DetectionEngine:
         }
 
 
-# 全局检测引擎实例（默认不加载Transformer）
-detection_engine = DetectionEngine()
+# 全局检测引擎实例，自动加载 ML 模型和 Transformer 模型（如存在且 torch 可用）
+import pathlib as _pathlib
+_models_dir = _pathlib.Path(__file__).parent.parent.parent / "models"
+_transformer_path = str(_models_dir / "transformer_cicids.pth")
+_ml_path = str(_models_dir / "ml_model.pkl")
+
+def _try_load_torch() -> bool:
+    """检测 torch 是否可用，避免 DLL 加载失败导致整个应用崩溃。"""
+    try:
+        import torch  # type: ignore  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+_use_transformer = (
+    _pathlib.Path(_transformer_path).exists() and _try_load_torch()
+)
+_use_ml = _pathlib.Path(_ml_path).exists()
+
+try:
+    detection_engine = DetectionEngine(
+        model_path=_ml_path if _use_ml else None,
+        transformer_model_path=_transformer_path if _use_transformer else None,
+    )
+except Exception:
+    detection_engine = DetectionEngine()
 
 
 def detect_anomalies(feature_vectors: List[FeatureVector]) -> List[Alert]:
